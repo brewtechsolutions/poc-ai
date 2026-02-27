@@ -1,133 +1,171 @@
-# Sales AI Chatbot Architecture
+# Sales AI Chatbot Architecture (MotorShop Example)
 
 ## 🏗️ System Overview
 
-This is an intelligent sales chatbot system built with:
-- **Workflow-based architecture** - JSON-driven workflow (n8n-like)
-- **NLP Processing** - OpenAI GPT-4o-mini for intent extraction
-- **Smart Recommendations** - AI-powered product ranking
-- **Multi-modal Support** - Text, images, voice messages
-- **Agent Escalation** - Automatic handoff to human agents
-- **Token Optimization** - Efficient API usage
+This project is an **AI-first, workflow-driven sales chatbot**. The current example is a **MotorShop 2nd-hand bike assistant**, but the core architecture is **generic**:
 
-## 📊 Architecture Diagram
+- **JSON workflow (`workflow.json`)** drives all logic (similar to n8n)  
+- **Workflow engine (`workflow-engine.js`)** is generic; it just executes the JSON  
+- **NLP**: OpenAI `gpt-4o-mini` for language detection, intent + entity extraction  
+- **Product search**: Prisma + PostgreSQL against a **generic `Product` table**  
+- **AI ranking**: GPT-based product ranking using context (budget, area, model, etc.)  
+- **Multi-modal**: hooks for image (Vision) and voice (Whisper) flows  
+- **Agent escalation**: routes to human when confidence is low or user asks  
+- **Token optimization**: small prompts, strict temperatures, response optimizer  
+
+The MotorShop use case is implemented purely via:
+
+- Seed data in `Product` (`category: "Motorcycle"`, features in JSON)  
+- Domain prompts + templates in `workflow.json` (no motorcycle-specific logic in JS)
+
+## 📊 High-Level Flow
 
 ```
-User Message (WhatsApp/Terminal/API)
+User Message (WhatsApp / Web UI / API)
     ↓
-Workflow Engine
+Express API (`/api/test-chat`) + Session Manager
     ↓
-Message Classifier (text/image/voice)
+WorkflowEngine.execute(context)
     ↓
-┌─────────────────┬──────────────┬──────────────┐
-│   Text Path     │  Image Path  │  Voice Path  │
-├─────────────────┼──────────────┼──────────────┤
-│ NLP Processor   │ Vision API   │ Whisper API  │
-│ (Intent/Entity) │ (GPT-4o)     │ (Transcribe) │
-│       ↓         │      ↓       │      ↓       │
-│ Intent Router   │ Image Search │ NLP Processor│
-│       ↓         │      ↓       │      ↓       │
-│ Product Search  │ Product Rank │ Intent Router│
-│       ↓         │      ↓       │      ↓       │
-│ Product Ranker  │ Format       │ Product Search│
-│       ↓         │      ↓       │      ↓       │
-│ Format Response │ Send         │ Product Rank │
-│       ↓         │              │      ↓       │
-│ Optimize        │              │ Format       │
-│       ↓         │              │      ↓       │
-│ Send Response   │              │ Optimize     │
-│                 │              │      ↓       │
-│                 │              │ Send Response│
-└─────────────────┴──────────────┴──────────────┘
+start → message_classifier → language_detector
+    ↓
+intent_router
+    ↓
+┌───────────────────────────────────────────────────────┐
+│ greeting               → greeting_handler            │
+│ bike/search intents    → bike_search → bike_ranker   │
+│ questions (budget/area)→ budget/area/model handlers  │
+│ price/spec/test-ride   → price/spec/test_ride nodes  │
+│ complaint/agent        → agent_escalation            │
+│ fallback               → clarification_handler       │
+└───────────────────────────────────────────────────────┘
+    ↓
+response_optimizer → response_sender → conversation_logger → end
 ```
+
+The **web test UI** (`public/test-chat.html`) talks to `/api/test-chat`, maintains a session, and renders:
+
+- User/bot messages with preserved line breaks  
+- Debug info (intent, confidence, tokens, workflow steps, errors)
 
 ## 🔄 Workflow System
 
 ### Workflow JSON Structure
 
-The `workflow.json` file defines the entire chatbot logic:
+The `workflow.json` file defines:
 
-1. **Nodes** - Individual processing steps
-2. **Routes** - Decision points and branching
-3. **Templates** - Response templates
-4. **Settings** - Token budgets, timeouts, etc.
+1. **Nodes** – steps like `language_detector`, `intent_router`, `bike_search`, `bike_ranker`, `bike_response_formatter`, `clarification_handler`, `agent_escalation`, etc.  
+2. **Routes** – intent-based routing in `intent_router` and `next` links between nodes.  
+3. **Templates** – multi-language responses (`greeting`, `bike_recommendation`, `clarification_questions`, `agent_transfer`, etc.).  
+4. **Settings** – model names, temperatures, token limits, and small control flags per node.
 
-### Key Workflow Nodes
+### Key Workflow Nodes (current MotorShop flow)
 
-1. **start** - Entry point, receives user message
-2. **message_classifier** - Classifies message type (text/image/voice)
-3. **nlp_processor** - Extracts intent and entities using GPT-4o-mini
-4. **intent_router** - Routes to appropriate handler based on intent
-5. **product_search** - Searches database for products
-6. **product_ranker** - AI ranks products by relevance
-7. **product_recommender** - Smart recommendations with high confidence
-8. **product_response_formatter** - Formats products for WhatsApp
-9. **response_optimizer** - Optimizes response for token usage
-10. **agent_escalation** - Handles escalation to human agents
-11. **response_sender** - Sends final response
-12. **conversation_logger** - Logs conversation to database
+1. **start** – Trigger node, receives the raw user message + metadata.  
+2. **message_classifier** – Classifies message type (`text` / `image` / `voice`).  
+3. **language_detector** – Single NLP node that:
+   - Detects language (Malay / Chinese / English)  
+   - Extracts `intent`, `entities`, and `confidence` using `gpt-4o-mini`  
+4. **intent_router** – Routes based on `intent`:
+   - `greeting` → `greeting_handler`  
+   - `search_motorcycle` / `inquire_about_motorcycle` → `bike_search`  
+   - `bike_inquiry` / `bike_recommendation` → `context_collector`  
+   - `price_inquiry` → `price_lookup`  
+   - `budget_question`, `area_question`, `model_question` → respective handlers  
+   - `complaint` / `agent_request` → `agent_escalation`  
+   - `goodbye` → `goodbye_handler`  
+   - Fallback → `clarification_handler`
+5. **context_collector** – ML node that analyses what’s missing (budget, area, model) and either:
+   - Sends user to `smart_question_generator` (to ask for missing info), or  
+   - Goes straight to `bike_search` when info is complete.
+6. **smart_question_generator → question_formatter** – Asks for missing info using a **standardized, numbered format** (budget / area / model) in the user’s language.  
+7. **bike_search** – Generic DB search over `Product`:
+   - Uses text query + entities (budget, model, brand, type, area)  
+   - Filters `active && inStock` and `category: "Motorcycle"`  
+   - Applies area filter via `features.locations`, but falls back gracefully if it would remove all results.  
+8. **bike_ranker** – ML node calling `gpt-4o-mini` to rank the found products:
+   - Considers budget, area, model, type, popularity, and user intent  
+   - Returns `products` with `relevance_score` and reasoning.  
+9. **bike_response_formatter** – Formats top products into a WhatsApp-style list:
+   - Multi-language template (`bike_recommendation`)  
+   - Numbered items, price, engine size, type, locations, stock status.  
+10. **clarification_handler** – When intent is unknown or low-confidence, sends a **clear, structured prompt** asking user for:
+    - `Budget (RM)`  
+    - `Area / Location`  
+    - `Preferred model / brand (optional)`  
+    with example reply in each language.  
+11. **agent_escalation** – Generates an “I’m connecting you to an agent” message and then routes to `response_sender`.  
+12. **response_optimizer** – Cleans up whitespace and ensures response stays within a rough token budget.  
+13. **response_sender** – Final action node; surfaces the chosen text back to the API/UI.  
+14. **conversation_logger** – Logs the conversation and **preserves the final response** so the API can always return it.
 
 ## 🧠 NLP Processing
 
 ### Intent Classification
 
-The system recognizes these intents:
-- `greeting` - User says hello
-- `product_inquiry` - User asks about products
-- `product_recommendation` - User wants recommendations
-- `price_inquiry` - User asks about price
-- `order_status` - User checks order status
-- `complaint` - User has a complaint
-- `general_question` - General questions
-- `goodbye` - User says goodbye
-- `agent_request` - User wants human agent
+The `language_detector` node currently focuses on motorcycle sales intents:
+
+- `greeting` – User says hello / starts conversation  
+- `bike_inquiry` – General questions about bikes (availability, types, etc.)  
+- `bike_recommendation` – User wants “best bike” suggestion  
+- `search_motorcycle` / `inquire_about_motorcycle` – Free-form search queries  
+- `price_inquiry` – Ask about price / installments  
+- `budget_question` / `area_question` / `model_question` – Follow-up questions  
+- `specification_question` – Ask about specs (cc, type, features)  
+- `test_ride_request` – Request to view / test ride  
+- `financing_question` – Loan/instalment questions  
+- `trade_in_question` – Trade-in bike questions  
+- `complaint` – Complaints or dissatisfaction  
+- `agent_request` – Explicit “talk to human”  
+- `goodbye` – End of conversation
+
+These are **configurable in `workflow.json`** and can be changed without touching JS.
 
 ### Entity Extraction
 
-Extracts:
-- `product_name` - Name of product
-- `product_category` - Category (e.g., "laptops")
-- `price_range` - Price range mentioned
-- `features` - Features requested
-- `brand` - Brand name
-- `quantity` - Number of items
-- `urgency` - Urgency level
+The same node extracts entities like:
+
+- `budget` / `price_range` – e.g. “below 5k”, “RM 3,000 – 5,000”  
+- `area` / `location` – e.g. Puchong, PJ, KL, Bahau  
+- `model` / `brand` – e.g. Ego S, Y15ZR, Honda, Yamaha  
+- `cc` / `engine size` – e.g. 110cc, 150cc  
+- `type` – scooter, kapcai, sport, etc.  
+- `condition` – new / used / recon  
+- `urgency` – how urgent the need is
 
 ## 🛍️ Product Recommendation System
 
-### Search Strategy
+### Search Strategy (generic Product model)
 
-1. **Database Search** - Searches products by:
-   - Name (fuzzy match)
-   - Description (text search)
-   - Category
-   - Tags
-   - Active and in-stock only
+1. **Database search (`bike_search` / `semantic_search`)**  
+   - Queries the `Product` table by:
+     - `name` (contains, case-insensitive)  
+     - `description`  
+     - `brand`  
+     - `category` / `subcategory`  
+     - `tags` (array overlap)  
+   - Filters:
+     - `active = true`, `inStock = true`  
+     - Optional `category` filter (e.g. `"Motorcycle"`)  
+     - Optional budget filter (price `<= budget`)  
+     - Optional loose area filter via `features.locations` (but falls back if no matches).  
 
-2. **AI Ranking** - Uses GPT-4o-mini to rank by:
-   - Exact name match
-   - Category relevance
-   - Feature match
-   - Price appropriateness
-   - User intent
+2. **AI ranking (`bike_ranker` ML node)**  
+   - Uses `gpt-4o-mini` with:
+     - User query  
+     - Extracted entities (budget, area, model, type)  
+     - A list of candidate products (name, price, type, locations, etc.)  
+   - Returns:
+     - `products`: array with `relevance_score` and reasoning  
+     - `overall_reasoning` and `confidence`  
 
-3. **Confidence Scoring** - Only recommends if confidence > 0.6
-
-### Recommendation Flow
-
-```
-User Query: "I need a laptop for gaming"
-    ↓
-Search Database → Find 10 products
-    ↓
-AI Ranking → Score each product (0-1)
-    ↓
-Filter by confidence > 0.6
-    ↓
-Return top 3 products
-    ↓
-Format response with images, prices, features
-```
+3. **Formatting (`bike_response_formatter`)**  
+   - Takes the **top N** ranked products and renders:
+     - Numbered list with name/model  
+     - Description  
+     - Price + currency  
+     - Engine size, type, and locations (if present in `features`)  
+   - Uses a multi-language `bike_recommendation` template.
 
 ## 🖼️ Image Processing
 
@@ -182,12 +220,17 @@ Send Transfer Message to User
 
 ### Key Tables
 
-- **Product** - Products with embeddings for semantic search
-- **User** - User profiles and preferences
-- **Conversation** - Conversation logs
-- **Message** - Individual messages
-- **Order** - Order tracking
-- **ProductView** - Analytics
+- **Product** – Generic products table (used here for motorcycles):
+  - `category` / `subcategory` (e.g. `"Motorcycle"`, `"Scooter"`, `"Kapcai"`)  
+  - `features` JSON for flexible fields:
+    - `model`, `year`, `type`, `engineSize`, `condition`  
+    - `locations` (e.g. `["Puchong", "PJ", "KL"]`)  
+    - `specifications` (engine, fuel system, transmission, etc.)  
+- **User** – User profiles, preferences, and history  
+- **Conversation** – Per-user conversation logs + stats  
+- **Message** – Individual messages within conversations  
+- **Order / OrderItem** – Basic order tracking (for future checkout flows)  
+- **ProductView** – Product analytics (views per user/product)
 
 ### Relationships
 
