@@ -1,0 +1,180 @@
+// Prisma schema for Sales AI Chatbot
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Generic Products table - flexible for any product type
+model Product {
+  id          String   @id @default(uuid())
+  name        String
+  description String?  @db.Text
+  category    String
+  subcategory String?
+  price       Float
+  currency    String   @default("MYR")
+  images      String[] // Array of image URLs
+  tags        String[] // Array of tags for search
+  features    Json?    // JSON object for flexible features (brand, model, locations, specs, etc.)
+  brand       String?
+  sku         String   @unique
+  inStock     Boolean  @default(true)
+  stockCount  Int      @default(0)
+  active      Boolean  @default(true)
+  popularity  Int      @default(0) // Sales count or views
+  // Store embeddings as JSON for portability; can be migrated to pgvector later
+  embedding   Json?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  orderItems  OrderItem[]
+  views       ProductView[]
+  
+  @@index([category])
+  @@index([brand])
+  @@index([active, inStock])
+  @@index([popularity])
+  @@index([price])
+}
+
+// User/Conversation tracking
+model User {
+  id            String   @id @default(uuid())
+  phoneNumber   String   @unique
+  name          String?
+  preferences   Json?    // User preferences, past purchases, etc.
+  conversationHistory Json? // Recent conversation context
+  
+  conversations Conversation[]
+  orders        Order[]
+  views         ProductView[]
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@index([phoneNumber])
+}
+
+// Conversation logging
+model Conversation {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  messages      Message[]
+  
+  intent        String?
+  entities      Json?
+  productsShown String[] // Array of product IDs shown
+  escalated     Boolean  @default(false)
+  agentId       String?
+  tokensUsed    Int      @default(0)
+  responseTime  Int?     // Response time in ms
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// Individual messages in conversation
+model Message {
+  id            String   @id @default(uuid())
+  conversationId String
+  conversation  Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  
+  type         String   // 'text', 'image', 'voice', 'video', 'document'
+  content      String?  @db.Text
+  mediaUrl     String?
+  isFromUser   Boolean  @default(true)
+  
+  intent       String?
+  entities     Json?
+  processed    Boolean  @default(false)
+  
+  createdAt    DateTime @default(now())
+  
+  @@index([conversationId])
+  @@index([createdAt])
+}
+
+// Orders tracking
+model Order {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  
+  items         OrderItem[]
+  status        String   @default("pending") // pending, confirmed, shipped, delivered, cancelled
+  totalAmount   Float
+  currency      String   @default("USD")
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@index([userId])
+  @@index([status])
+}
+
+model OrderItem {
+  id        String   @id @default(uuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id])
+  
+  quantity  Int
+  price     Float
+  
+  createdAt DateTime @default(now())
+}
+
+// Product views for analytics
+model ProductView {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  
+  viewedAt  DateTime @default(now())
+  
+  @@index([productId])
+  @@index([userId])
+}
+
+// Agent assignments
+model Agent {
+  id          String   @id @default(uuid())
+  name        String
+  email       String   @unique
+  phoneNumber String?
+  active      Boolean  @default(true)
+  currentLoad Int      @default(0) // Number of active conversations
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// Knowledge base for general Q&A
+model KnowledgeBase {
+  id          String   @id @default(uuid())
+  question    String
+  answer      String   @db.Text
+  category    String?
+  tags        String[]
+  // Store embeddings as JSON for portability; can be migrated to pgvector later
+  embedding   Json?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([category])
+}

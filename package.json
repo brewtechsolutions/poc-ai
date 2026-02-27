@@ -1,0 +1,43 @@
+{
+  "name": "sales-ai-chatbot",
+  "version": "1.0.0",
+  "description": "Intelligent sales AI chatbot with WhatsApp integration",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "test": "node src/test/terminal-test.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio",
+    "seed": "node prisma/seed.js"
+  },
+  "keywords": [
+    "chatbot",
+    "ai",
+    "whatsapp",
+    "sales",
+    "nlp"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@prisma/client": "^5.7.1",
+    "express": "^4.18.2",
+    "dotenv": "^16.3.1",
+    "openai": "^4.20.1",
+    "whatsapp-web.js": "^1.23.0",
+    "pg": "^8.11.3",
+    "pgvector": "^0.1.8",
+    "axios": "^1.6.2",
+    "sharp": "^0.32.6",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "prisma": "^5.7.1"
+  },
+  "prisma": {
+    "seed": "node prisma/seed.js"
+  }
+}

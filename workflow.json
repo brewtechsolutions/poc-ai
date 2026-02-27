@@ -1,0 +1,590 @@
+{
+  "workflow": {
+    "name": "MotorShop AI Chatbot - Motorcycle Sales Assistant",
+    "version": "2.0.0",
+    "description": "Intelligent motorcycle sales chatbot with multi-language support, budget analysis, and smart recommendations",
+    "nodes": [
+      {
+        "id": "start",
+        "type": "trigger",
+        "name": "Message Received",
+        "config": {
+          "input": "user_message",
+          "metadata": ["phone_number", "message_type", "timestamp", "media_url", "voice_url"],
+          "next": "message_classifier"
+        }
+      },
+      {
+        "id": "message_classifier",
+        "type": "classifier",
+        "name": "Message Type Classifier",
+        "config": {
+          "classify": [
+            {
+              "type": "text",
+              "conditions": ["message_type === 'text'"],
+              "next": "language_detector"
+            },
+            {
+              "type": "image",
+              "conditions": ["message_type === 'image'"],
+              "next": "image_processor"
+            },
+            {
+              "type": "voice",
+              "conditions": ["message_type === 'voice'"],
+              "next": "voice_processor"
+            }
+          ]
+        }
+      },
+      {
+        "id": "language_detector",
+        "type": "nlp",
+        "name": "Language & Intent Detection",
+        "config": {
+          "model": "gpt-4o-mini",
+          "temperature": 0.2,
+          "max_tokens": 200,
+          "system_prompt": "You are a motorcycle sales assistant. Detect the language (Malay, Chinese, English) and extract intent from the user message. Return JSON with: language (malay/chinese/english), intent, entities, confidence (0-1), requires_budget_info, requires_area_info, requires_model_info.",
+          "extract": {
+            "intents": [
+              "greeting",
+              "bike_inquiry",
+              "bike_recommendation",
+              "price_inquiry",
+              "budget_question",
+              "area_question",
+              "model_question",
+              "specification_question",
+              "test_ride_request",
+              "financing_question",
+              "trade_in_question",
+              "complaint",
+              "agent_request",
+              "goodbye"
+            ],
+            "entities": [
+              "budget",
+              "price_range",
+              "area",
+              "location",
+              "model",
+              "brand",
+              "cc",
+              "type",
+              "condition",
+              "urgency"
+            ]
+          },
+          "confidence_threshold": 0.7,
+          "next_high_confidence": "intent_router",
+          "next_low_confidence": "clarification_handler"
+        }
+      },
+      {
+        "id": "intent_router",
+        "type": "router",
+        "name": "Intent Router",
+        "config": {
+          "routes": [
+            {
+              "intent": "greeting",
+              "next": "greeting_handler",
+              "response_template": "greeting_response"
+            },
+            {
+              "intent": "inquire_about_motorcycle",
+              "next": "bike_search",
+              "requires_context": false
+            },
+            {
+              "intent": "search_motorcycle",
+              "next": "bike_search",
+              "requires_context": false
+            },
+            {
+              "intent": "bike_inquiry",
+              "next": "context_collector",
+              "requires_context": true
+            },
+            {
+              "intent": "bike_recommendation",
+              "next": "context_collector",
+              "requires_context": true
+            },
+            {
+              "intent": "price_inquiry",
+              "next": "price_lookup",
+              "requires_context": true
+            },
+            {
+              "intent": "budget_question",
+              "next": "budget_handler"
+            },
+            {
+              "intent": "area_question",
+              "next": "area_handler"
+            },
+            {
+              "intent": "model_question",
+              "next": "model_handler"
+            },
+            {
+              "intent": "specification_question",
+              "next": "specification_lookup"
+            },
+            {
+              "intent": "test_ride_request",
+              "next": "test_ride_handler"
+            },
+            {
+              "intent": "financing_question",
+              "next": "financing_handler"
+            },
+            {
+              "intent": "trade_in_question",
+              "next": "trade_in_handler"
+            },
+            {
+              "intent": "complaint",
+              "next": "agent_escalation",
+              "priority": "high"
+            },
+            {
+              "intent": "agent_request",
+              "next": "agent_escalation",
+              "priority": "medium"
+            },
+            {
+              "intent": "goodbye",
+              "next": "goodbye_handler"
+            }
+          ],
+          "fallback": "clarification_handler"
+        }
+      },
+      {
+        "id": "context_collector",
+        "type": "ml",
+        "name": "Smart Context Collector",
+        "config": {
+          "model": "gpt-4o-mini",
+          "temperature": 0.3,
+          "max_tokens": 300,
+          "system_prompt": "Analyze the user's motorcycle inquiry. Determine what information is missing: budget, area/location, preferred model/brand, bike type (sport, cruiser, scooter, etc), engine size (cc), new/used preference. Return JSON with: missing_info (array), has_budget (boolean), has_area (boolean), has_model (boolean), should_ask_budget (boolean), should_ask_area (boolean), should_ask_model (boolean), reasoning.",
+          "next_missing_info": "smart_question_generator",
+          "next_complete": "bike_search"
+        }
+      },
+      {
+        "id": "smart_question_generator",
+        "type": "ml",
+        "name": "Smart Question Generator",
+        "config": {
+          "model": "gpt-4o-mini",
+          "temperature": 0.4,
+          "max_tokens": 200,
+          "system_prompt": "Generate a natural, friendly question in the user's language (Malay/Chinese/English) to ask for missing information. Be conversational and helpful. Return JSON with: question (string), question_type (budget/area/model/other), language (same as user).",
+          "next": "question_formatter"
+        }
+      },
+      {
+        "id": "question_formatter",
+        "type": "formatter",
+        "name": "Question Formatter",
+        "config": {
+          "template": "smart_question",
+          "include_context": true,
+          "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "bike_search",
+        "type": "database",
+        "name": "Product Search",
+        "config": {
+          "operation": "semantic_search",
+          "category": "Motorcycle",
+          "search_fields": ["name", "description", "brand", "tags"],
+          "filters": {
+            "active": true,
+            "inStock": true
+          },
+          "limit": 15,
+          "similarity_threshold": 0.7,
+          "use_embeddings": true,
+          "next_found": "bike_ranker",
+          "next_not_found": "no_results_handler"
+        }
+      },
+      {
+        "id": "bike_ranker",
+        "type": "ml",
+        "name": "Smart Product Ranker",
+        "config": {
+          "model": "gpt-4o-mini",
+          "temperature": 0.2,
+          "max_tokens": 400,
+          "system_prompt": "Rank products by relevance to user's requirements. Consider: budget match, area availability, model preference, specifications, user intent. Provide detailed reasoning. Return JSON with: products (array with id, relevance_score, reasoning), overall_reasoning, confidence.",
+          "ranking_factors": [
+            "budget_match",
+            "area_availability",
+            "model_match",
+            "specification_match",
+            "popularity",
+            "user_preference_match"
+          ],
+          "top_n": 5,
+          "min_relevance_score": 0.65,
+          "next": "bike_response_formatter"
+        }
+      },
+      {
+        "id": "bike_response_formatter",
+        "type": "formatter",
+        "name": "Product Response Formatter",
+        "config": {
+          "template": "bike_recommendation",
+          "include_images": true,
+          "include_price": true,
+          "include_specs": true,
+          "include_location": true,
+          "include_availability": true,
+          "max_products": 5,
+          "format": "whatsapp",
+          "language_aware": true,
+          "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "price_lookup",
+        "type": "database",
+        "name": "Price Lookup",
+        "config": {
+          "operation": "get_price",
+          "next": "price_response_formatter"
+        }
+      },
+      {
+        "id": "price_response_formatter",
+        "type": "formatter",
+        "name": "Price Response Formatter",
+        "config": {
+          "template": "price_info",
+          "language_aware": true,
+          "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "budget_handler",
+        "type": "handler",
+        "name": "Budget Handler",
+        "config": {
+          "template": "budget_guidance",
+          "language_aware": true,
+          "next": "context_update"
+        }
+      },
+      {
+        "id": "area_handler",
+        "type": "handler",
+        "name": "Area Handler",
+        "config": {
+          "template": "area_info",
+          "language_aware": true,
+          "next": "context_update"
+        }
+      },
+      {
+        "id": "model_handler",
+        "type": "handler",
+        "name": "Model Handler",
+        "config": {
+          "template": "model_info",
+          "language_aware": true,
+          "next": "context_update"
+        }
+      },
+      {
+        "id": "specification_lookup",
+        "type": "database",
+        "name": "Specification Lookup",
+        "config": {
+          "operation": "get_specs",
+          "next": "spec_response_formatter"
+        }
+      },
+      {
+        "id": "spec_response_formatter",
+        "type": "formatter",
+        "name": "Specification Response Formatter",
+        "config": {
+          "template": "specification_info",
+          "language_aware": true,
+          "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "test_ride_handler",
+        "type": "handler",
+        "name": "Test Ride Handler",
+        "config": {
+          "template": "test_ride_info",
+          "language_aware": true,
+          "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "financing_handler",
+        "type": "handler",
+        "name": "Financing Handler",
+        "config": {
+          "template": "financing_info",
+          "language_aware": true,
+          "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "trade_in_handler",
+        "type": "handler",
+        "name": "Trade-In Handler",
+        "config": {
+          "template": "trade_in_info",
+          "language_aware": true,
+          "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "greeting_handler",
+        "type": "handler",
+        "name": "Greeting Handler",
+        "config": {
+          "template": "greeting",
+          "personalize": true,
+          "include_quick_replies": true,
+          "language_aware": true,
+          "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "clarification_handler",
+        "type": "handler",
+        "name": "Clarification Handler",
+        "config": {
+          "max_clarifications": 2,
+          "template": "clarification_questions",
+          "language_aware": true,
+          "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "no_results_handler",
+        "type": "handler",
+        "name": "No Results Handler",
+        "config": {
+          "template": "no_results",
+          "suggest_alternatives": true,
+          "offer_agent": true,
+          "language_aware": true,
+          "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "agent_escalation",
+        "type": "escalation",
+        "name": "Human Agent Escalation",
+        "config": {
+          "triggers": [
+            "confidence < 0.5",
+            "intent === 'complaint'",
+            "intent === 'agent_request'",
+            "complex_query === true",
+            "user_insists === true"
+          ],
+          "priority": "auto-assign",
+          "notify_agent": true,
+          "transfer_context": true,
+          "message_template": "agent_transfer",
+          "language_aware": true,
+          "next": "response_sender"
+        }
+      },
+      {
+        "id": "goodbye_handler",
+        "type": "handler",
+        "name": "Goodbye Handler",
+        "config": {
+          "template": "goodbye",
+          "save_conversation": true,
+          "language_aware": true,
+          "next": "conversation_logger"
+        }
+      },
+      {
+        "id": "image_processor",
+        "type": "vision",
+        "name": "Image Processor",
+        "config": {
+          "model": "gpt-4o",
+          "max_tokens": 300,
+          "system_prompt": "Analyze motorcycle image. Identify: brand, model, approximate year, condition, modifications, price estimate. Extract any visible text. Return structured JSON.",
+          "extract_text": true,
+          "identify_motorcycle": true,
+          "next": "image_to_bike_search"
+        }
+      },
+      {
+        "id": "image_to_bike_search",
+        "type": "database",
+        "name": "Image-Based Product Search",
+        "config": {
+          "operation": "visual_search",
+          "use_image_embeddings": true,
+          "similarity_threshold": 0.7,
+          "next": "bike_ranker"
+        }
+      },
+      {
+        "id": "voice_processor",
+        "type": "speech",
+        "name": "Voice to Text",
+        "config": {
+          "model": "whisper-1",
+          "language": "auto-detect",
+          "next": "language_detector"
+        }
+      },
+      {
+        "id": "context_update",
+        "type": "handler",
+        "name": "Context Update",
+        "config": {
+          "save_context": true,
+          "next": "bike_search"
+        }
+      },
+      {
+        "id": "response_optimizer",
+        "type": "optimizer",
+        "name": "Response Token Optimizer",
+        "config": {
+          "max_tokens": 600,
+          "optimize_for": "whatsapp",
+          "remove_redundancy": true,
+          "compress_while_clear": true,
+          "language_aware": true,
+          "next": "response_sender"
+        }
+      },
+      {
+        "id": "response_sender",
+        "type": "action",
+        "name": "Send Response",
+        "config": {
+          "channel": "whatsapp",
+          "format": "text",
+          "include_media": true,
+          "include_quick_replies": true,
+          "language_aware": true,
+          "next": "conversation_logger"
+        }
+      },
+      {
+        "id": "conversation_logger",
+        "type": "database",
+        "name": "Log Conversation",
+        "config": {
+          "operation": "log",
+          "database": "conversations",
+          "save": ["message", "response", "intent", "entities", "language", "bikes_shown", "tokens_used", "response_time"],
+          "next": "end"
+        }
+      },
+      {
+        "id": "end",
+        "type": "end",
+        "name": "End Workflow",
+        "config": {}
+      }
+    ],
+    "templates": {
+      "greeting": {
+        "english": "Hello! 👋 Welcome to MotorShop! I'm your AI motorcycle assistant. I can help you find the perfect bike based on your budget, location, and preferences. How can I assist you today?",
+        "malay": "Hello! 👋 Selamat datang ke MotorShop! Saya pembantu AI motosikal anda. Saya boleh membantu anda mencari motosikal yang sesuai berdasarkan bajet, lokasi, dan pilihan anda. Bagaimana saya boleh membantu?",
+        "chinese": "你好！👋 欢迎来到MotorShop！我是您的AI摩托车助手。我可以根据您的预算、位置和偏好帮您找到完美的摩托车。今天我能为您做些什么？"
+      },
+      "greeting_response": {
+        "english": "Hi there! I'm here to help you find your dream motorcycle. What type of bike are you looking for?",
+        "malay": "Hai! Saya di sini untuk membantu anda mencari motosikal impian anda. Apakah jenis motosikal yang anda cari?",
+        "chinese": "你好！我在这里帮您找到您梦想的摩托车。您在寻找什么类型的摩托车？"
+      },
+      "bike_recommendation": {
+        "english": "Based on your requirements, here are my top recommendations:\n\n{bikes}\n\nWould you like more details on any of these?",
+        "malay": "Berdasarkan keperluan anda, berikut adalah cadangan teratas saya:\n\n{bikes}\n\nAdakah anda ingin maklumat lanjut mengenai mana-mana motosikal ini?",
+        "chinese": "根据您的需求，以下是我的最佳推荐：\n\n{bikes}\n\n您想了解其中任何一款的更多详情吗？"
+      },
+      "no_results": {
+        "english": "I couldn't find motorcycles matching your exact criteria. Let me help you:\n\n1. Try adjusting your budget or preferences\n2. Browse by category\n3. Talk to a human agent\n\nWhat would you like to do?",
+        "malay": "Saya tidak dapat mencari motosikal yang sepadan dengan kriteria anda. Biar saya membantu:\n\n1. Cuba laraskan bajet atau pilihan anda\n2. Layari mengikut kategori\n3. Bercakap dengan ejen manusia\n\nApa yang anda mahu lakukan?",
+        "chinese": "我找不到完全符合您标准的摩托车。让我帮您：\n\n1. 尝试调整您的预算或偏好\n2. 按类别浏览\n3. 与人工客服交谈\n\n您想做什么？"
+      },
+      "clarification_questions": {
+        "english": "To give you the best recommendations, please reply with these items (you can answer in one line):\n\n1) **Budget (RM)** – e.g. RM 5,000 – RM 8,000\n2) **Area / Location** – e.g. Puchong, PJ, KL\n3) **Preferred model / brand (optional)** – e.g. Yamaha Ego S, Honda\n\nExample reply:\nRM 5,000, Puchong, Yamaha Ego S",
+        "malay": "Untuk saya cadangkan motosikal terbaik, sila balas dengan maklumat berikut (boleh jawab dalam satu baris sahaja):\n\n1) **Bajet (RM)** – cth: RM 5,000 – RM 8,000\n2) **Kawasan / Lokasi** – cth: Puchong, PJ, KL\n3) **Model / jenama pilihan (pilihan sahaja)** – cth: Yamaha Ego S, Honda\n\nContoh balasan:\nRM 5,000, Puchong, Yamaha Ego S",
+        "chinese": "为了给您最合适的推荐，请按下面这样回复（可以一行写完）：\n\n1) **预算（RM）** – 例如：RM 5,000 – RM 8,000\n2) **地区 / 位置** – 例如：Puchong、PJ、KL\n3) **偏好的车型 / 品牌（可选）** – 例如：Yamaha Ego S、Honda\n\n示例回复：\nRM 5,000，Puchong，Yamaha Ego S"
+      },
+      "agent_transfer": {
+        "english": "I'm connecting you with one of our expert motorcycle consultants who can better assist you. Please hold on...",
+        "malay": "Saya sedang menyambungkan anda dengan salah seorang perunding motosikal pakar kami yang boleh membantu anda dengan lebih baik. Sila tunggu...",
+        "chinese": "我正在为您联系我们的专业摩托车顾问，他们可以更好地帮助您。请稍候..."
+      },
+      "goodbye": {
+        "english": "Thank you for chatting with MotorShop! Feel free to come back anytime if you need help finding your perfect motorcycle. Ride safe! 🏍️",
+        "malay": "Terima kasih kerana berbual dengan MotorShop! Jangan ragu untuk kembali pada bila-bila masa jika anda memerlukan bantuan mencari motosikal sempurna anda. Selamat memandu! 🏍️",
+        "chinese": "感谢您与MotorShop聊天！如果您需要帮助找到完美的摩托车，请随时回来。安全驾驶！🏍️"
+      },
+      "budget_guidance": {
+        "english": "Great question! Motorcycles range from RM 3,000 for entry-level bikes to RM 50,000+ for premium models. What's your budget range? I can recommend bikes that fit perfectly!",
+        "malay": "Soalan yang bagus! Motosikal bermula dari RM 3,000 untuk motosikal peringkat permulaan hingga RM 50,000+ untuk model premium. Apakah julat bajet anda? Saya boleh mencadangkan motosikal yang sesuai!",
+        "chinese": "好问题！摩托车的价格从入门级摩托车的3,000令吉到高级型号的50,000令吉以上。您的预算范围是多少？我可以推荐完全适合的摩托车！"
+      },
+      "area_info": {
+        "english": "We have showrooms in multiple locations! Which area are you in? I can check availability and arrange a viewing or test ride near you.",
+        "malay": "Kami mempunyai showroom di pelbagai lokasi! Anda berada di kawasan mana? Saya boleh menyemak ketersediaan dan mengaturkan lawatan atau ujian memandu berhampiran anda.",
+        "chinese": "我们在多个地点都有展厅！您在哪个地区？我可以检查可用性并在您附近安排看车或试驾。"
+      },
+      "model_info": {
+        "english": "We have a wide range of models from various brands. Are you looking for a specific brand or model? Or would you like me to recommend based on your needs?",
+        "malay": "Kami mempunyai pelbagai model dari pelbagai jenama. Adakah anda mencari jenama atau model tertentu? Atau adakah anda mahu saya mencadangkan berdasarkan keperluan anda?",
+        "chinese": "我们有来自各种品牌的各种型号。您在寻找特定品牌或型号吗？或者您想让我根据您的需求推荐？"
+      }
+    },
+    "settings": {
+      "max_conversation_turns": 30,
+      "token_budget_per_conversation": 3000,
+      "response_timeout": 45,
+      "enable_caching": true,
+      "cache_ttl": 300,
+      "enable_analytics": true,
+      "performance_monitoring": true,
+      "supported_languages": ["english", "malay", "chinese"]
+    },
+    "optimization": {
+      "token_optimization": {
+        "strategy": "aggressive",
+        "compress_responses": true,
+        "use_caching": true,
+        "batch_requests": true,
+        "max_tokens_per_request": 600
+      },
+      "performance": {
+        "parallel_processing": true,
+        "async_operations": true,
+        "database_connection_pooling": true,
+        "response_caching": true,
+        "max_response_time_ms": 4000
+      }
+    }
+  }
+}
