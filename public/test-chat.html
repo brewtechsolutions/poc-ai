@@ -294,7 +294,13 @@
 
       const bubble = document.createElement('div');
       bubble.className = 'message-bubble';
-      bubble.textContent = content;
+      // Preserve line breaks from the bot (e.g. numbered lists) by converting \n to <br>
+      const safeContent = String(content)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\n/g, '<br>');
+      bubble.innerHTML = safeContent;
       messageDiv.appendChild(bubble);
 
       const time = document.createElement('div');
