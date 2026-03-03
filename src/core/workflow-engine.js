@@ -103,7 +103,15 @@ class WorkflowEngine {
         executionContext.tokensUsed += result.tokensUsed || 0;
         executionContext.lastResult = result;
         executionContext.allResults.push(result); // Store for response extraction
-        
+
+        // Track detected language in execution context (if not already set)
+        if (result.data?.language && !executionContext.language) {
+          executionContext.language = result.data.language;
+        }
+        if (result.data?.intent) {
+          executionContext.lastIntent = result.data.intent;
+        }
+
         // Track final response if found
         if (result.data?.finalResponse || result.data?.optimized || result.data?.response) {
           executionContext.finalResponse = result.data.finalResponse || 
@@ -207,9 +215,144 @@ class WorkflowEngine {
       case 'speech':
         return await this.handleSpeech(node, context);
       
+      case 'language_selector':
+        return this.handleLanguageSelector(node, context);
+      
+      case 'model_details':
+        return this.handleModelDetails(node, context);
+      
       default:
         return { data: context.lastResult?.data, tokensUsed: 0 };
     }
+  }
+
+  /**
+   * Resolve user selection (number or name) to a product from lastShownProducts and return full details.
+   */
+  handleModelDetails(node, context) {
+    const templateKey = node.config.template || 'model_detail_full';
+    const language = context.language || context.lastResult?.data?.language || 'english';
+    const lastShown = context.lastShownProducts || context.metadata?.lastShownProducts;
+    const message = (context.user_message || '').trim().toLowerCase();
+
+    let product = null;
+    if (lastShown && Array.isArray(lastShown) && lastShown.length > 0) {
+      const idx = context.lastResult?.data?.entities?.selected_index;
+      if (Number.isInteger(idx) && idx >= 1 && idx <= lastShown.length) {
+        product = lastShown[idx - 1];
+      }
+      if (!product) {
+        product = lastShown.find(p =>
+          (p.name && String(p.name).toLowerCase().includes(message)) ||
+          (p.brand && String(p.brand).toLowerCase().includes(message)) ||
+          (p.features?.model && String(p.features.model).toLowerCase().includes(message))
+        ) || null;
+      }
+    }
+
+    if (!product) {
+      const fallback = this.workflow.templates?.model_detail_full?.[language] || this.workflow.templates?.model_detail_full?.english;
+      const msg = fallback ? 'Please reply with the number (e.g. 1, 2, 3) or the bike name from the list above.' : 'I couldn\'t find that model. Please reply with the number or name from the list.';
+      return {
+        data: {
+          response: msg,
+          formatted: msg,
+          finalResponse: msg,
+        },
+        tokensUsed: 0,
+      };
+    }
+
+    const features = product.features || {};
+    const specs = features.specifications
+      ? Object.entries(features.specifications).map(([k, v]) => `${k}: ${v}`).join('\n')
+      : (features.engine ? `Engine: ${features.engine}` : '') + (features.fuelSystem ? `\nFuel: ${features.fuelSystem}` : '') + (features.transmission ? `\nTransmission: ${features.transmission}` : '');
+    const nameOnly = (product.name || '').trim();
+    const modelPart = (features.model || '').trim();
+    const title = modelPart && !nameOnly.toLowerCase().includes(modelPart.toLowerCase()) ? `${nameOnly} ${modelPart}` : nameOnly;
+    const locations = features.locations && features.locations.length ? ` (${features.locations.join(', ')})` : '';
+    const engine = features.engineSize ? `${features.engineSize}cc` : (features.engine || '');
+    const type = features.type || product.subcategory || '';
+    const inStockText = product.inStock ? 'In Stock' : 'Out of Stock';
+
+    let template = '';
+    if (typeof this.workflow.templates?.[templateKey] === 'object') {
+      template = this.workflow.templates[templateKey][language] || this.workflow.templates[templateKey]['english'] || '';
+    } else {
+      template = this.workflow.templates?.[templateKey] || '';
+    }
+
+    let response = template
+      .replace(/\{name\}/g, title)
+      .replace(/\{description\}/g, product.description || 'No description')
+      .replace(/\{currency\}/g, product.currency || 'MYR')
+      .replace(/\{price\}/g, (product.price != null && product.price.toLocaleString) ? product.price.toLocaleString() : product.price)
+      .replace(/\{locations\}/g, locations)
+      .replace(/\{engine\}/g, engine)
+      .replace(/\{type\}/g, type)
+      .replace(/\{inStock\}/g, inStockText)
+      .replace(/\{specs\}/g, specs || '—');
+
+    return {
+      data: {
+        product,
+        response,
+        formatted: response,
+        finalResponse: response,
+      },
+      tokensUsed: 0,
+    };
+  }
+
+  /**
+   * Language selector: enforce "choose language first". If context.language is set, continue;
+   * if user message is 1/2/3 or language name, set language and go to greeting; else prompt to choose.
+   */
+  handleLanguageSelector(node, context) {
+    const config = node.config || {};
+    const nextIfSet = config.next_if_set || 'message_classifier';
+    const nextAfterSelect = config.next_after_select || 'greeting_handler';
+    const nextPrompt = config.next_prompt || 'language_selection_prompt';
+
+    const existingLanguage = context.language || context.metadata?.language;
+    if (existingLanguage) {
+      const normalized = String(existingLanguage).toLowerCase();
+      if (['english', 'malay', 'chinese', 'en', 'bm', 'zh'].includes(normalized)) {
+        context.language = normalized === 'en' ? 'english' : normalized === 'bm' ? 'malay' : normalized === 'zh' ? 'chinese' : normalized;
+        if (process.env.DEBUG === 'true') {
+          console.log(`   [LanguageSelector] Language already set: ${context.language}`);
+        }
+        return { data: { language: context.language }, tokensUsed: 0, next: nextIfSet };
+      }
+    }
+
+    const raw = (context.user_message || '').trim();
+    const msg = raw.toLowerCase();
+    let selected = null;
+    if (/^1$|^english$|^en$/i.test(msg)) selected = 'english';
+    else if (/^2$|^malay$|^bm$|^bahasa$/i.test(msg)) selected = 'malay';
+    else if (/^3$|^chinese$|^zh$|^中文$/i.test(msg) || msg.includes('chinese') || msg.includes('中文')) selected = 'chinese';
+
+    if (selected) {
+      context.language = selected;
+      if (process.env.DEBUG === 'true') {
+        console.log(`   [LanguageSelector] User selected language: ${selected}`);
+      }
+      return {
+        data: { language: selected },
+        tokensUsed: 0,
+        next: nextAfterSelect,
+      };
+    }
+
+    if (process.env.DEBUG === 'true') {
+      console.log(`   [LanguageSelector] No language set, prompting user to choose`);
+    }
+    return {
+      data: { needLanguageChoice: true },
+      tokensUsed: 0,
+      next: nextPrompt,
+    };
   }
 
   /**
@@ -261,7 +404,19 @@ class WorkflowEngine {
       if (nextNode) return nextNode;
     }
 
-    // PRIORITY 5: Check fallback
+    // PRIORITY 5: Context complete / missing (e.g. context_collector)
+    if (config.next_complete && result.data?.contextComplete) {
+      const nextNode = this.nodes.get(config.next_complete);
+      if (DEBUG) console.log(`   [NextNode] Context complete, using: ${config.next_complete}`);
+      if (nextNode) return nextNode;
+    }
+    if (config.next_missing_info && !result.data?.contextComplete) {
+      const nextNode = this.nodes.get(config.next_missing_info);
+      if (DEBUG) console.log(`   [NextNode] Missing info, using: ${config.next_missing_info}`);
+      if (nextNode) return nextNode;
+    }
+
+    // PRIORITY 6: Check fallback
     if (config.fallback) {
       const nextNode = this.nodes.get(config.fallback);
       if (DEBUG) console.log(`   [NextNode] Using fallback: ${config.fallback}`);
@@ -306,6 +461,43 @@ class WorkflowEngine {
     };
   }
 
+  /**
+   * Detect "budget, area, model" reply (e.g. "RM 5,000, Puchong, Yamaha Ego") and parse without calling API.
+   * Returns null if message doesn't match this format.
+   * Handles comma inside budget (e.g. 5,000) by extracting budget first, then splitting the rest for area/model.
+   */
+  parseStructuredBudgetAreaModel(message, context = {}) {
+    const raw = String(message).trim();
+    if (!raw) return null;
+    const hasRm = /\bRM\s*\d/i.test(raw) || /^\s*\d[\d,\s]*\d/.test(raw) || /^\s*\d+/.test(raw);
+    if (!hasRm) return null;
+
+    // Extract budget first so "5,000" isn't split into parts (RM 5,000 -> budget 5000)
+    const budgetMatch = raw.match(/RM\s*([\d,]+)/i) || raw.match(/^([\d,]+)/);
+    if (!budgetMatch) return null;
+    const budget = budgetMatch[1].replace(/,/g, '');
+    const afterBudget = raw.slice(raw.indexOf(budgetMatch[0]) + budgetMatch[0].length).replace(/^[\s,]+/, '').trim();
+    if (!afterBudget) return null;
+
+    // Rest is "Puchong, Yamaha Ego" or "Puchong" only
+    const restParts = afterBudget.split(/\s*,\s*/).map(p => p.trim()).filter(Boolean);
+    const area = restParts[0] || null;
+    const model = restParts.length >= 2 ? restParts.slice(1).join(', ') : null;
+
+    return {
+      intent: 'bike_recommendation',
+      entities: {
+        budget: budget || undefined,
+        area: area || undefined,
+        location: area || undefined,
+        model: model || undefined,
+        brand: model || undefined,
+      },
+      language: context.language || 'english',
+      confidence: 0.95,
+    };
+  }
+
   async handleNLP(node, context) {
     const message = context.user_message || context.lastResult?.data?.message;
     
@@ -324,11 +516,107 @@ class WorkflowEngine {
         error: 'No message to process',
       };
     }
+
+    // Rule-based: "got others?" / more options -> show more suggestions (reuse last search)
+    const lower = message.toLowerCase().trim();
+    if (/got others?|any others?|more options?|show more|other (bikes?|options?|suggestions?)|ada lain|还有别的|其他(的)?(选择|推荐)?/i.test(lower) && lower.length < 80) {
+      if (process.env.DEBUG === 'true') console.log(`   [NLP] More options detected: more_options`);
+      return {
+        data: {
+          intent: 'more_options',
+          entities: context.entities || context.metadata?.entities || {},
+          language: context.language || 'english',
+          confidence: 0.9,
+          requires_product_search: true,
+          requires_agent_escalation: false,
+        },
+        tokensUsed: 0,
+        confidence: 0.9,
+      };
+    }
+    // Rule-based: user selected a model by number (1, 2, 3) or by name -> model_selection
+    const lastShown = context.lastShownProducts || context.metadata?.lastShownProducts;
+    if (lastShown && Array.isArray(lastShown) && lastShown.length > 0) {
+      const trimmed = message.trim();
+      const num = parseInt(trimmed, 10);
+      if (Number.isInteger(num) && num >= 1 && num <= lastShown.length) {
+        if (process.env.DEBUG === 'true') console.log(`   [NLP] Model selection by number: ${num}`);
+        return {
+          data: {
+            intent: 'model_selection',
+            entities: { selected_index: num },
+            language: context.language || 'english',
+            confidence: 0.95,
+            requires_product_search: false,
+            requires_agent_escalation: false,
+          },
+          tokensUsed: 0,
+          confidence: 0.95,
+        };
+      }
+      const matchByName = lastShown.find(p =>
+        (p.name && (p.name).toLowerCase().includes(lower)) ||
+        (p.brand && (p.brand).toLowerCase().includes(lower)) ||
+        (p.features?.model && String(p.features.model).toLowerCase().includes(lower))
+      );
+      if (matchByName && lower.length < 80) {
+        if (process.env.DEBUG === 'true') console.log(`   [NLP] Model selection by name`);
+        return {
+          data: {
+            intent: 'model_selection',
+            entities: {},
+            language: context.language || 'english',
+            confidence: 0.9,
+            requires_product_search: false,
+            requires_agent_escalation: false,
+          },
+          tokensUsed: 0,
+          confidence: 0.9,
+        };
+      }
+    }
+
+    // Rule-based: "more detail" -> prompt which bike they want details on
+    if (/more detail|tell me more|full specs?|full details?|详细|maklumat lanjut/i.test(lower) && lower.length < 60) {
+      if (process.env.DEBUG === 'true') console.log(`   [NLP] More details detected: more_details`);
+      return {
+        data: {
+          intent: 'more_details',
+          entities: {},
+          language: context.language || 'english',
+          confidence: 0.9,
+          requires_product_search: false,
+          requires_agent_escalation: false,
+        },
+        tokensUsed: 0,
+        confidence: 0.9,
+      };
+    }
+
+    // Rule-based: recognize "RM X, Location, Model" so user's reply is accepted and goes to bike search
+    const structured = this.parseStructuredBudgetAreaModel(message, context);
+    if (structured) {
+      if (process.env.DEBUG === 'true') {
+        console.log(`   [NLP] Structured reply detected: bike_recommendation, budget=${structured.entities.budget}, area=${structured.entities.area}, model=${structured.entities.model}`);
+      }
+      return {
+        data: {
+          intent: structured.intent,
+          entities: structured.entities,
+          language: structured.language,
+          confidence: structured.confidence,
+          requires_product_search: true,
+          requires_agent_escalation: false,
+        },
+        tokensUsed: 0,
+        confidence: structured.confidence,
+      };
+    }
     
     const systemPrompt = node.config.system_prompt || 
-      "You are a sales assistant. Extract intent and entities from user messages.";
+      "You are a sales assistant. Extract intent, language and entities from user messages.";
     
-    const userPrompt = `Extract intent and entities from this message: "${message}"\n\nReturn JSON with: intent, entities (object), confidence (0-1), requires_product_search (boolean), requires_agent_escalation (boolean)`;
+    const userPrompt = `Extract intent, language and entities from this message: "${message}"\n\nReturn JSON with: language (english/malay/chinese), intent, entities (object), confidence (0-1), requires_product_search (boolean), requires_agent_escalation (boolean)`;
 
     try {
       if (process.env.DEBUG === 'true') {
@@ -349,14 +637,18 @@ class WorkflowEngine {
       const content = JSON.parse(completion.choices[0].message.content);
       const tokensUsed = completion.usage.total_tokens;
 
+      const detectedLanguage = context.language || content.language || 'english';
+
       if (process.env.DEBUG === 'true') {
-        console.log(`   [NLP] Intent: ${content.intent}, Confidence: ${content.confidence || 0.5}`);
+        console.log(`   [NLP] Language: ${detectedLanguage}, Intent: ${content.intent}, Confidence: ${content.confidence || 0.5}`);
       }
 
       return {
         data: {
           intent: content.intent,
           entities: content.entities || {},
+          // Never override existing conversation language with a new guess
+          language: detectedLanguage,
           confidence: content.confidence || 0.5,
           requires_product_search: content.requires_product_search || false,
           requires_agent_escalation: content.requires_agent_escalation || false,
@@ -375,6 +667,7 @@ class WorkflowEngine {
         data: {
           intent: 'general_question',
           entities: {},
+          language: 'english',
           confidence: 0.3,
           requires_product_search: false,
           requires_agent_escalation: false,
@@ -433,63 +726,172 @@ class WorkflowEngine {
 
   async semanticProductSearch(node, context, lastResult) {
     const query = context.user_message || '';
-    const entities = lastResult?.entities || {};
+    // Use last search criteria when user says "got others?" / more_options (entities from session)
+    const entities = lastResult?.entities || context.entities || context.metadata?.entities || {};
     const category = node.config.category || entities.category || null;
-    
-    // Build search query - generic for any product type
-    const searchTerms = query.toLowerCase().split(' ').filter(t => t.length > 2);
-    
-    // Build where clause
-    const whereClause = {
-      AND: [
-        { active: true },
-        { inStock: true },
-        {
-          OR: [
-            { name: { contains: query, mode: 'insensitive' } },
-            { description: { contains: query, mode: 'insensitive' } },
-            { brand: { contains: entities.brand || query, mode: 'insensitive' } },
-            { category: { contains: category || query, mode: 'insensitive' } },
-            { subcategory: { contains: entities.type || query, mode: 'insensitive' } },
-            { tags: { hasSome: searchTerms } },
-          ],
-        },
-        // Budget filter (if provided)
-        entities.budget ? {
-          price: {
-            lte: parseFloat(entities.budget) || undefined,
+    const isMoreOptions = context.lastIntent === 'more_options';
+
+    // MODEL-FIRST: when user specified a model/brand, search by model first, then apply budget and location
+    const modelSearchText = (entities.model || entities.brand || '').toString().trim();
+    const hasRequestedModel = !isMoreOptions && modelSearchText.length > 0;
+    const primarySearchText = modelSearchText || query;
+    const searchTerms = primarySearchText.toLowerCase().split(/\s+/).filter(t => t.length > 2);
+    const budgetNum = entities.budget ? parseFloat(entities.budget) : null;
+
+    const limit = isMoreOptions
+      ? (node.config.more_options_limit || 10)
+      : (node.config.limit || 15);
+
+    let finalProducts = [];
+
+    if (hasRequestedModel) {
+      // 1) Model first: query only by model/brand/name (no budget, no area in DB query)
+      const modelOnlyConditions = {
+        AND: [
+          { active: true },
+          { inStock: true },
+          {
+            OR: [
+              { name: { contains: primarySearchText, mode: 'insensitive' } },
+              { brand: { contains: primarySearchText, mode: 'insensitive' } },
+              { subcategory: { contains: entities.type || primarySearchText, mode: 'insensitive' } },
+              { description: { contains: query, mode: 'insensitive' } },
+              { category: { contains: category || query, mode: 'insensitive' } },
+              { tags: { hasSome: searchTerms } },
+            ],
           },
-        } : {},
-      ],
-    };
+        ],
+      };
 
-    // Search products
-    const products = await prisma.product.findMany({
-      where: whereClause,
-      take: node.config.limit || 15,
-      orderBy: { popularity: 'desc' },
-    });
-
-    // Filter by area/location if specified (check features JSON)
-    let filteredProducts = products;
-    if (entities.area) {
-      filteredProducts = products.filter(p => {
-        const locations = p.features?.locations || [];
-        return locations.length === 0 || locations.some(loc =>
-          loc.toLowerCase().includes(entities.area.toLowerCase())
-        );
+      const modelMatches = await prisma.product.findMany({
+        where: modelOnlyConditions,
+        take: limit,
+        orderBy: { popularity: 'desc' },
       });
 
-      // If area filter removed everything (e.g. new town like "Bahau"), fall back to all products
-      if (filteredProducts.length === 0) {
-        filteredProducts = products;
+      // 2) Then filter by budget (in memory)
+      let afterBudget = modelMatches;
+      if (budgetNum != null) {
+        afterBudget = modelMatches.filter(p => p.price <= budgetNum);
+      }
+
+      // 3) Then filter by area/location (in memory)
+      let afterArea = afterBudget;
+      if (entities.area) {
+        afterArea = afterBudget.filter(p => {
+          const locations = p.features?.locations || [];
+          return locations.length === 0 || locations.some(loc =>
+            loc.toLowerCase().includes(entities.area.toLowerCase())
+          );
+        });
+        if (afterArea.length === 0) afterArea = afterBudget;
+      }
+
+      // Model is priority: always return model matches so the requested bike is shown first.
+      // If some model matches fit budget+area, use those first; then add the rest of the model matches.
+      if (modelMatches.length > 0) {
+        const modelIds = new Set(modelMatches.map(p => p.id));
+        const inBudgetAndArea = afterArea.filter(p => modelIds.has(p.id));
+        // Requested model first (those in budget+area, then the rest of model matches)
+        finalProducts = [...inBudgetAndArea, ...modelMatches.filter(p => !inBudgetAndArea.find(m => m.id === p.id))];
+
+        // If the requested model is a bit pricey (over budget), add alternatives at the bottom that fit budget+location
+        const modelIsPricey = budgetNum != null && inBudgetAndArea.length === 0;
+        if (modelIsPricey) {
+          const altConditions = {
+            AND: [
+              { active: true },
+              { inStock: true },
+              { price: { lte: budgetNum } },
+              { id: { notIn: [...modelIds] } },
+            ],
+          };
+          const alternatives = await prisma.product.findMany({
+            where: altConditions,
+            take: node.config.alternatives_limit || 5,
+            orderBy: { popularity: 'desc' },
+          });
+          let altFiltered = alternatives;
+          if (entities.area) {
+            altFiltered = alternatives.filter(p => {
+              const locations = p.features?.locations || [];
+              return locations.length === 0 || locations.some(loc =>
+                loc.toLowerCase().includes(entities.area.toLowerCase())
+              );
+            });
+            if (altFiltered.length === 0) altFiltered = alternatives;
+          }
+          finalProducts = [...finalProducts, ...altFiltered];
+        }
+        finalProducts = finalProducts.slice(0, limit + (node.config.alternatives_limit || 5));
       }
     }
 
+    if (!hasRequestedModel || finalProducts.length === 0) {
+      // No requested model, or no model matches: use original logic (budget + area in query)
+      const baseConditions = {
+        AND: [
+          { active: true },
+          { inStock: true },
+        ],
+      };
+
+      if (!isMoreOptions) {
+        baseConditions.AND.push({
+          OR: [
+            { name: { contains: primarySearchText, mode: 'insensitive' } },
+            { brand: { contains: primarySearchText, mode: 'insensitive' } },
+            { subcategory: { contains: entities.type || primarySearchText, mode: 'insensitive' } },
+            { description: { contains: query, mode: 'insensitive' } },
+            { category: { contains: category || query, mode: 'insensitive' } },
+            { tags: { hasSome: searchTerms } },
+          ],
+        });
+      }
+
+      if (!isMoreOptions && budgetNum != null) {
+        baseConditions.AND.push({ price: { lte: budgetNum } });
+      }
+
+      const products = await prisma.product.findMany({
+        where: baseConditions,
+        take: limit,
+        orderBy: { popularity: 'desc' },
+      });
+
+      let filteredProducts = products;
+      if (entities.area) {
+        filteredProducts = products.filter(p => {
+          const locations = p.features?.locations || [];
+          return locations.length === 0 || locations.some(loc =>
+            loc.toLowerCase().includes(entities.area.toLowerCase())
+          );
+        });
+        if (filteredProducts.length === 0) filteredProducts = products;
+      }
+
+      if (hasRequestedModel && finalProducts.length === 0) {
+        finalProducts = filteredProducts;
+      } else if (!hasRequestedModel) {
+        finalProducts = filteredProducts;
+      }
+    }
+
+    const useFallbackWhenEmpty = node.config.use_fallback_when_empty === true;
+    if ((!finalProducts || finalProducts.length === 0) && useFallbackWhenEmpty) {
+      const fallbackLimit = node.config.fallback_limit || 5;
+      const fallbackProducts = await prisma.product.findMany({
+        where: { active: true, inStock: true },
+        orderBy: { popularity: 'desc' },
+        take: fallbackLimit,
+      });
+      finalProducts = fallbackProducts;
+    }
+
     return {
-      data: { products: filteredProducts },
+      data: { products: finalProducts || [] },
       tokensUsed: 0,
-      found: filteredProducts.length > 0,
+      found: (finalProducts && finalProducts.length) > 0,
     };
   }
 
@@ -575,10 +977,45 @@ class WorkflowEngine {
     };
   }
 
+  /**
+   * Get entities from the most recent node that produced them (e.g. language_detector).
+   * context_collector runs after intent_router, which does not pass entities; they live in an earlier result.
+   */
+  getEntitiesFromContext(context) {
+    const results = context.allResults || [];
+    for (let i = results.length - 1; i >= 0; i--) {
+      const entities = results[i]?.data?.entities;
+      if (entities && typeof entities === 'object' && Object.keys(entities).length > 0) {
+        return entities;
+      }
+    }
+    return context.lastResult?.data?.entities || {};
+  }
+
   async handleML(node, context) {
     const lastResult = context.lastResult?.data;
     const products = lastResult?.products || [];
     const userQuery = context.user_message;
+
+    // Context collector: if user already gave budget + area, go to bike_search (routing via config.next_complete in getNextNode)
+    if (node.id === 'context_collector') {
+      const entities = this.getEntitiesFromContext(context);
+      const hasBudget = !!(entities.budget || entities.price_range);
+      const hasArea = !!(entities.area || entities.location);
+      const contextComplete = hasBudget && hasArea;
+      if (process.env.DEBUG === 'true') {
+        console.log(`   [ML/context_collector] contextComplete=${contextComplete}, hasBudget=${hasBudget}, hasArea=${hasArea}`);
+      }
+      return {
+        data: {
+          ...lastResult,
+          entities,
+          contextComplete,
+        },
+        tokensUsed: 0,
+        confidence: contextComplete ? 0.95 : 0.5,
+      };
+    }
     
     // Use ProductRecommender for smart recommendations
     if (node.id === 'product_recommender') {
@@ -600,10 +1037,12 @@ class WorkflowEngine {
     // Product Ranker (bike_ranker or product_ranker) - use AI ranking
     if (node.id === 'bike_ranker' || node.id === 'product_ranker') {
       if (products.length === 0) {
+        // Route to no_results_handler so user gets "sorry we don't sell this bike"
         return {
           data: { products: [], reasoning: 'No products found' },
           tokensUsed: 0,
           confidence: 0,
+          next: 'no_results_handler',
         };
       }
 
@@ -643,21 +1082,35 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
         const content = JSON.parse(completion.choices[0].message.content);
         const tokensUsed = completion.usage.total_tokens;
 
-        // Map rankings back to product objects
-        const rankedProducts = (content.products || []).map(ranked => {
-          const product = products.find(p => 
-            p.id === ranked.id || 
+        // Map rankings back to product objects (match by id, exact name, or brand+model)
+        const topN = node.config.top_n || 5;
+        const normalize = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        let rankedProducts = (content.products || []).map(ranked => {
+          const name = (ranked.name || ranked.id || '').toString();
+          const product = products.find(p =>
+            p.id === ranked.id ||
             p.name === ranked.name ||
-            `${p.brand} ${p.features?.model || ''}`.trim() === ranked.name
+            normalize(p.name).includes(normalize(name)) ||
+            normalize(name).includes(normalize(p.name)) ||
+            `${p.brand} ${p.features?.model || ''}`.trim() === name
           );
           if (!product) return null;
           return {
             ...product,
-            relevance_score: ranked.relevance_score || 0.5,
+            relevance_score: ranked.relevance_score ?? 0.5,
             reasoning: ranked.reasoning || 'Relevant product',
           };
-        }).filter(Boolean).sort((a, b) => b.relevance_score - a.relevance_score)
-          .slice(0, node.config.top_n || 5);
+        }).filter(Boolean).sort((a, b) => (b.relevance_score ?? 0) - (a.relevance_score ?? 0))
+          .slice(0, topN);
+
+        // If LLM returned no matching names, show seed/search results anyway so user sees products
+        if (rankedProducts.length === 0 && products.length > 0) {
+          rankedProducts = products.slice(0, topN).map(p => ({
+            ...p,
+            relevance_score: 0.7,
+            reasoning: 'Matches your search',
+          }));
+        }
 
         return {
           data: {
@@ -689,33 +1142,66 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
     };
   }
 
+  /** Check if any product matches the requested model/brand (e.g. "Yamaha Ego S"). */
+  productMatchesRequestedModel(product, requestedModel) {
+    if (!requestedModel || typeof requestedModel !== 'string') return true;
+    const n = (s) => (s || '').toLowerCase().trim();
+    const key = n(requestedModel);
+    const name = n(product.name);
+    const brand = n(product.brand || '');
+    const model = n(product.features?.model || '');
+    return name.includes(key) || (brand + ' ' + model).trim().includes(key) || model.includes(key);
+  }
+
   handleFormatter(node, context) {
     const products = context.lastResult?.data?.products || [];
     const templateKey = node.config.template;
     const language = context.language || context.lastResult?.data?.language || 'english';
-    
+    const entities = this.getEntitiesFromContext(context);
+    const modelPart = (entities.model || '').trim();
+    const brandPart = (entities.brand || '').trim();
+    const requestedModel = !modelPart && !brandPart ? null
+      : !modelPart ? brandPart
+      : !brandPart ? modelPart
+      : brandPart.toLowerCase() === modelPart.toLowerCase() ? modelPart
+      : `${brandPart} ${modelPart}`.trim();
+
+    // When showing bike recommendations: use "we don't have this model but have alternatives" if requested model not in list
+    let effectiveTemplateKey = templateKey;
+    if (templateKey === 'bike_recommendation' && requestedModel && products.length > 0) {
+      const hasRequestedModel = products.some(p => this.productMatchesRequestedModel(p, requestedModel));
+      if (!hasRequestedModel && this.workflow.templates.no_model_alternatives) {
+        effectiveTemplateKey = 'no_model_alternatives';
+      }
+    }
+
     // Get template - support multi-language
     let template = '';
-    if (typeof this.workflow.templates[templateKey] === 'object') {
-      template = this.workflow.templates[templateKey][language] || 
-                 this.workflow.templates[templateKey]['english'] || 
+    if (typeof this.workflow.templates[effectiveTemplateKey] === 'object') {
+      template = this.workflow.templates[effectiveTemplateKey][language] ||
+                 this.workflow.templates[effectiveTemplateKey]['english'] ||
                  '';
     } else {
-      template = this.workflow.templates[templateKey] || '';
+      template = this.workflow.templates[effectiveTemplateKey] || '';
     }
 
     let formatted = template;
-    
-    // Format products generically
+    if (effectiveTemplateKey === 'no_model_alternatives' && requestedModel) {
+      formatted = formatted.replace(/\{model\}/g, requestedModel);
+    }
+
+    // Format products generically (avoid repeating model in title if already in product.name)
     if (products.length > 0) {
       const productsText = products.map((product, i) => {
         const features = product.features || {};
         const model = features.model || '';
+        const nameOnly = (product.name || '').trim();
+        const modelInName = model && nameOnly.toLowerCase().includes(model.toLowerCase());
+        const title = model && !modelInName ? `${nameOnly} ${model}` : nameOnly;
         const engineSize = features.engineSize ? `${features.engineSize}cc` : '';
         const type = features.type || product.subcategory || '';
         const locations = features.locations ? ` (${features.locations.join(', ')})` : '';
-        
-        return `${i + 1}. *${product.name}${model ? ` ${model}` : ''}*\n   ${product.description || 'No description'}\n   Price: ${product.currency || 'MYR'} ${product.price?.toLocaleString() || product.price}${locations}\n   ${engineSize ? `Engine: ${engineSize}\n   ` : ''}${type ? `Type: ${type}\n   ` : ''}${product.inStock ? '✅ In Stock' : '❌ Out of Stock'}`;
+        return `${i + 1}. *${title}*\n   ${product.description || 'No description'}\n   Price: ${product.currency || 'MYR'} ${product.price?.toLocaleString() || product.price}${locations}\n   ${engineSize ? `Engine: ${engineSize}\n   ` : ''}${type ? `Type: ${type}\n   ` : ''}${product.inStock ? '✅ In Stock' : '❌ Out of Stock'}`;
       }).join('\n\n');
       
       formatted = formatted.replace('{bikes}', productsText);
@@ -730,8 +1216,12 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
       formatted = formatted.replace('{questions}', questions);
     }
 
+    // When no products, placeholder might be empty; still pass formatted so downstream can use it
+    if (products.length === 0 && (formatted.includes('{bikes}') || formatted.includes('{products}'))) {
+      formatted = formatted.replace(/\{bikes\}\s*/g, '').replace(/\{products\}\s*/g, '').trim();
+    }
     return {
-      data: { formatted, products },
+      data: { formatted, products, response: formatted },
       tokensUsed: 0,
     };
   }

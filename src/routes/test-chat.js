@@ -49,16 +49,22 @@ router.post('/api/test-chat', async (req, res) => {
     };
     session.messages.push(userMessage);
 
-    // Execute workflow
+    // Execute workflow (pass persisted language so "choose language first" is skipped after selection)
     const workflowEngine = new WorkflowEngine();
     const context = {
       user_message: message,
+      language: session.language,
       phone_number: session.phoneNumber,
       conversation_id: currentSessionId,
+      entities: session.lastEntities,
+      lastShownProducts: session.lastShownProducts,
       metadata: {
         phone_number: session.phoneNumber,
         message_type: 'text',
         timestamp: new Date().toISOString(),
+        language: session.language,
+        entities: session.lastEntities,
+        lastShownProducts: session.lastShownProducts,
       },
       conversationHistory: session.messages.slice(-5).map(m => ({
         role: m.type === 'user' ? 'user' : 'assistant',
@@ -67,6 +73,21 @@ router.post('/api/test-chat', async (req, res) => {
     };
 
     const result = await workflowEngine.execute(context);
+
+    // Persist selected language for next messages (language-first flow)
+    if (result.language) {
+      session.language = result.language;
+    }
+    // Persist last search entities so "got others?" / more_options can reuse criteria
+    const entitiesFromResult = result.allResults?.find(r => r.data?.entities && Object.keys(r.data.entities).length > 0)?.data?.entities;
+    if (entitiesFromResult && (entitiesFromResult.budget || entitiesFromResult.area || entitiesFromResult.location)) {
+      session.lastEntities = entitiesFromResult;
+    }
+    // Persist last shown products so user can select by number/name for full details
+    const productsFromResult = result.allResults?.find(r => r.data?.products && Array.isArray(r.data.products))?.data?.products;
+    if (productsFromResult && productsFromResult.length > 0) {
+      session.lastShownProducts = productsFromResult;
+    }
     
     // Extract response - check multiple sources
     let response = null;
@@ -145,12 +166,14 @@ router.post('/api/test-chat', async (req, res) => {
       success: true,
       sessionId: currentSessionId,
       response: response,
+      language: result.language || session.language,
       conversation: {
         messages: session.messages,
         stats: {
           totalMessages: session.messages.length,
           totalTokens: session.totalTokens,
           duration: Date.now() - session.startTime,
+          language: session.language,
         },
       },
       debug: {
