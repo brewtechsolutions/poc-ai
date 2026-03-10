@@ -198,7 +198,7 @@ class WorkflowEngine {
         return this.handleFormatter(node, context);
       
       case 'optimizer':
-        return this.handleOptimizer(node, context);
+        return await this.handleOptimizer(node, context);
       
       case 'handler':
         return await this.handleHandler(node, context);
@@ -219,7 +219,7 @@ class WorkflowEngine {
         return this.handleLanguageSelector(node, context);
       
       case 'model_details':
-        return this.handleModelDetails(node, context);
+        return await this.handleModelDetails(node, context);
       
       default:
         return { data: context.lastResult?.data, tokensUsed: 0 };
@@ -227,17 +227,25 @@ class WorkflowEngine {
   }
 
   /**
-   * Resolve user selection (number or name) to a product from lastShownProducts and return full details.
+   * Resolve user selection (number or name) to a product from lastShownProducts or by DB lookup; return full details or "we don't have this model".
    */
-  handleModelDetails(node, context) {
+  async handleModelDetails(node, context) {
     const templateKey = node.config.template || 'model_detail_full';
     const language = context.language || context.lastResult?.data?.language || 'english';
     const lastShown = context.lastShownProducts || context.metadata?.lastShownProducts;
     const message = (context.user_message || '').trim().toLowerCase();
+    const entities = context.lastResult?.data?.entities || context.entities || {};
+
+    // selected_index can come from router (pass-through) or from NLP result in allResults
+    let selectedIndex = entities.selected_index;
+    if (!Number.isInteger(selectedIndex) && context.allResults?.length) {
+      const nlpResult = context.allResults.find(r => r.data?.intent === 'model_selection' && r.data?.entities?.selected_index != null);
+      selectedIndex = nlpResult?.data?.entities?.selected_index;
+    }
 
     let product = null;
     if (lastShown && Array.isArray(lastShown) && lastShown.length > 0) {
-      const idx = context.lastResult?.data?.entities?.selected_index;
+      const idx = selectedIndex;
       if (Number.isInteger(idx) && idx >= 1 && idx <= lastShown.length) {
         product = lastShown[idx - 1];
       }
@@ -250,9 +258,47 @@ class WorkflowEngine {
       }
     }
 
+    // Not in list: try DB lookup by model name (e.g. "i want ego s" -> search for "ego s")
     if (!product) {
-      const fallback = this.workflow.templates?.model_detail_full?.[language] || this.workflow.templates?.model_detail_full?.english;
-      const msg = fallback ? 'Please reply with the number (e.g. 1, 2, 3) or the bike name from the list above.' : 'I couldn\'t find that model. Please reply with the number or name from the list.';
+      const modelName = (entities.model || '').toString().trim() || this.extractModelNameFromMessage(context.user_message || '');
+      if (modelName.length >= 2) {
+        const dbMatches = await prisma.product.findMany({
+          where: {
+            AND: [
+              { active: true },
+              { inStock: true },
+              {
+                OR: [
+                  { name: { contains: modelName, mode: 'insensitive' } },
+                  { brand: { contains: modelName, mode: 'insensitive' } },
+                  { description: { contains: modelName, mode: 'insensitive' } },
+                ],
+              },
+            ],
+          },
+          take: 5,
+          orderBy: { popularity: 'desc' },
+        });
+        if (dbMatches.length > 0) {
+          product = dbMatches[0];
+        } else {
+          // Fallback: match on features.model (JSON field)
+          const allActive = await prisma.product.findMany({
+            where: { AND: [ { active: true }, { inStock: true } ] },
+            take: 200,
+          });
+          const byFeaturesModel = allActive.find(p =>
+            p.features && typeof p.features === 'object' &&
+            String((p.features.model || '')).toLowerCase().includes(modelName.toLowerCase())
+          );
+          if (byFeaturesModel) product = byFeaturesModel;
+        }
+      }
+    }
+
+    if (!product) {
+      const notFoundTpl = this.workflow.templates?.model_not_found;
+      const msg = notFoundTpl?.[language] || notFoundTpl?.english || "I'm sorry, we don't have this model. Would you like to see other bikes we have?";
       return {
         data: {
           response: msg,
@@ -302,6 +348,24 @@ class WorkflowEngine {
       },
       tokensUsed: 0,
     };
+  }
+
+  /**
+   * Extract model name from messages like "i want ego s", "looking for yamaha ego", "ego s".
+   */
+  extractModelNameFromMessage(text) {
+    const t = (text || '').trim();
+    if (!t) return '';
+    const lower = t.toLowerCase();
+    const patterns = [
+      /(?:i want|i'm looking for|looking for|do you have|got any|have you got|show me)\s+(.+)/i,
+      /(?:can i (?:see|get)|would like)\s+(.+)/i,
+    ];
+    for (const re of patterns) {
+      const m = t.match(re);
+      if (m && m[1]) return m[1].trim().replace(/\?|\.$/, '').slice(0, 80);
+    }
+    return t.length <= 80 ? t : t.slice(0, 80);
   }
 
   /**
@@ -534,6 +598,91 @@ class WorkflowEngine {
         confidence: 0.9,
       };
     }
+
+    // Rule-based: "got Honda?" / "got Yamaha" etc. -> treat as brand/model request
+    const gotBrandMatch = lower.match(/^got\s+([a-z0-9][a-z0-9\s\-]+)/i);
+    if (gotBrandMatch && gotBrandMatch[1]) {
+      const brandOrModel = gotBrandMatch[1].replace(/[?.!]+$/g, '').trim();
+      if (brandOrModel.length >= 2 && brandOrModel.length <= 40) {
+        if (process.env.DEBUG === 'true') {
+          console.log(`   [NLP] Brand/model request detected via "got X": ${brandOrModel}`);
+        }
+        return {
+          data: {
+            intent: 'bike_recommendation',
+            entities: { brand: brandOrModel, model: brandOrModel },
+            language: context.language || 'english',
+            confidence: 0.9,
+            requires_product_search: true,
+            requires_agent_escalation: false,
+          },
+          tokensUsed: 0,
+          confidence: 0.9,
+        };
+      }
+    }
+
+    // Rule-based: keyword "arrange" or test ride phrases -> test_ride_request (show instructions + deposit), NOT agent transfer
+    const arrangeOrTestRide = /\barrange\b/i.test(lower) || /arrange (a )?test ride|book (a )?test ride|test ride|ujian memandu|预约试驾|试驾/i.test(lower);
+    if (arrangeOrTestRide && lower.length < 80) {
+      if (process.env.DEBUG === 'true') console.log(`   [NLP] Arrange / test ride keyword -> test_ride_request (show instructions + deposit)`);
+      return {
+        data: {
+          intent: 'test_ride_request',
+          entities: {},
+          language: context.language || 'english',
+          confidence: 0.95,
+          requires_product_search: false,
+          requires_agent_escalation: false,
+        },
+        tokensUsed: 0,
+        confidence: 0.95,
+      };
+    }
+
+    // Rule-based: content words -> agent_request (transfer to real agent, one response, end session)
+    const agentNode = this.nodes.get('agent_escalation');
+    const contentWords = (agentNode?.config?.content_words || []).map(w => String(w).trim().toLowerCase()).filter(Boolean);
+    if (contentWords.length > 0 && lower.length <= 80) {
+      const matchesContentWord = contentWords.some(cw => lower === cw || lower.includes(cw));
+      if (matchesContentWord) {
+        if (process.env.DEBUG === 'true') console.log(`   [NLP] Content word matched -> agent_request (transfer to agent)`);
+        return {
+          data: {
+            intent: 'agent_request',
+            entities: {},
+            language: context.language || 'english',
+            confidence: 0.95,
+            requires_product_search: false,
+            requires_agent_escalation: true,
+          },
+          tokensUsed: 0,
+          confidence: 0.95,
+        };
+      }
+    }
+
+    // Rule-based: "i want [model]" / "looking for [model]" etc. -> model_selection so we can look up in DB
+    const extractedModel = this.extractModelNameFromMessage(message);
+    const stopPhrases = /^(to |the |more |details?|price|info|about|how much|what is|test ride)/i;
+    if (extractedModel.length >= 2 && extractedModel.length <= 60 && !/^\d+$/.test(extractedModel) && !stopPhrases.test(extractedModel)) {
+      const looksLikeModelRequest = /^(i want|i'm looking for|looking for|do you have|got any|have you got|show me|can i see|would like)\s+/i.test(lower) || (/^(ego s|yamaha|honda|modenas|suzuki|kawasaki|ninja|rxz|lc135|ego|nmax|aerox)/i.test(lower) && lower.split(/\s+/).length <= 4);
+      if (looksLikeModelRequest) {
+        if (process.env.DEBUG === 'true') console.log(`   [NLP] Model lookup by name: "${extractedModel}"`);
+        return {
+          data: {
+            intent: 'model_selection',
+            entities: { model: extractedModel },
+            language: context.language || 'english',
+            confidence: 0.85,
+            requires_product_search: false,
+            requires_agent_escalation: false,
+          },
+          tokensUsed: 0,
+          confidence: 0.85,
+        };
+      }
+    }
     // Rule-based: user selected a model by number (1, 2, 3) or by name -> model_selection
     const lastShown = context.lastShownProducts || context.metadata?.lastShownProducts;
     if (lastShown && Array.isArray(lastShown) && lastShown.length > 0) {
@@ -612,6 +761,32 @@ class WorkflowEngine {
         confidence: structured.confidence,
       };
     }
+
+    // Rule-based: budget-only messages like "I only have the budget of RM5,000"
+    const budgetOnlyMatch = message.match(/\b(?:budget|bajet)[^0-9]{0,15}RM\s*([\d,]+)/i) ||
+                            message.match(/\bRM\s*([\d,]+)[^a-zA-Z0-9]{0,10}(?:budget|bajet)\b/i);
+    if (budgetOnlyMatch) {
+      const budgetStr = (budgetOnlyMatch[1] || '').replace(/,/g, '');
+      if (budgetStr) {
+        if (process.env.DEBUG === 'true') {
+          console.log(`   [NLP] Budget-only message detected, budget=${budgetStr}`);
+        }
+        return {
+          data: {
+            intent: 'bike_recommendation',
+            entities: {
+              budget: budgetStr,
+            },
+            language: context.language || 'english',
+            confidence: 0.9,
+            requires_product_search: true,
+            requires_agent_escalation: false,
+          },
+          tokensUsed: 0,
+          confidence: 0.9,
+        };
+      }
+    }
     
     const systemPrompt = node.config.system_prompt || 
       "You are a sales assistant. Extract intent, language and entities from user messages.";
@@ -682,13 +857,15 @@ class WorkflowEngine {
   handleRouter(node, context) {
     const intent = context.lastResult?.data?.intent;
     const route = node.config.routes.find(r => r.intent === intent);
+    // Pass through entities from classifier/NLP so model_details_handler gets selected_index
+    const entities = context.lastResult?.data?.entities;
     
     if (process.env.DEBUG === 'true') {
       console.log(`   [Router] Intent: ${intent}, Route found: ${!!route}, Next: ${route?.next || node.config.fallback}`);
     }
     
     return {
-      data: { intent, route },
+      data: { intent, route, entities: entities || {} },
       tokensUsed: 0,
       next: route?.next || node.config.fallback,
     };
@@ -795,7 +972,7 @@ class WorkflowEngine {
         // Requested model first (those in budget+area, then the rest of model matches)
         finalProducts = [...inBudgetAndArea, ...modelMatches.filter(p => !inBudgetAndArea.find(m => m.id === p.id))];
 
-        // If the requested model is a bit pricey (over budget), add alternatives at the bottom that fit budget+location
+        // If the requested model is a bit pricey (over budget), add exactly ONE alternative that fits budget+location
         const modelIsPricey = budgetNum != null && inBudgetAndArea.length === 0;
         if (modelIsPricey) {
           const altConditions = {
@@ -808,7 +985,7 @@ class WorkflowEngine {
           };
           const alternatives = await prisma.product.findMany({
             where: altConditions,
-            take: node.config.alternatives_limit || 5,
+            take: 10,
             orderBy: { popularity: 'desc' },
           });
           let altFiltered = alternatives;
@@ -821,9 +998,73 @@ class WorkflowEngine {
             });
             if (altFiltered.length === 0) altFiltered = alternatives;
           }
-          finalProducts = [...finalProducts, ...altFiltered];
+          finalProducts = [...finalProducts, ...altFiltered.slice(0, 1)];
+        } else {
+          // Model in budget: still add exactly one alternative by budget+location
+          const altConditions = {
+            AND: [
+              { active: true },
+              { inStock: true },
+              { id: { notIn: [...modelIds] } },
+            ],
+          };
+          if (budgetNum != null) altConditions.AND.push({ price: { lte: budgetNum } });
+          const alternatives = await prisma.product.findMany({
+            where: altConditions,
+            take: 10,
+            orderBy: { popularity: 'desc' },
+          });
+          let altFiltered = alternatives;
+          if (entities.area) {
+            altFiltered = alternatives.filter(p => {
+              const locations = p.features?.locations || [];
+              return locations.length === 0 || locations.some(loc =>
+                loc.toLowerCase().includes(entities.area.toLowerCase())
+              );
+            });
+            if (altFiltered.length === 0) altFiltered = alternatives;
+          }
+          finalProducts = [...finalProducts, ...altFiltered.slice(0, 1)];
         }
-        finalProducts = finalProducts.slice(0, limit + (node.config.alternatives_limit || 5));
+        finalProducts = finalProducts.slice(0, 4);
+      } else {
+        // No exact match: search whole DB for "nearly same" (same brand or any word in model name)
+        const modelWords = primarySearchText.split(/\s+/).filter(w => w.length >= 2).map(w => w.trim());
+        if (modelWords.length > 0) {
+          const orConditions = [];
+          for (const word of modelWords) {
+            orConditions.push({ name: { contains: word, mode: 'insensitive' } });
+            orConditions.push({ brand: { contains: word, mode: 'insensitive' } });
+            orConditions.push({ description: { contains: word, mode: 'insensitive' } });
+          }
+          const nearMatchConditions = {
+            AND: [
+              { active: true },
+              { inStock: true },
+              { OR: orConditions },
+            ],
+          };
+          const nearMatches = await prisma.product.findMany({
+            where: nearMatchConditions,
+            take: limit,
+            orderBy: { popularity: 'desc' },
+          });
+          let nearFiltered = nearMatches;
+          if (budgetNum != null) {
+            nearFiltered = nearMatches.filter(p => p.price <= budgetNum);
+            if (nearFiltered.length === 0) nearFiltered = nearMatches;
+          }
+          if (entities.area) {
+            const byArea = nearFiltered.filter(p => {
+              const locations = p.features?.locations || [];
+              return locations.length === 0 || locations.some(loc =>
+                loc.toLowerCase().includes(entities.area.toLowerCase())
+              );
+            });
+            if (byArea.length > 0) nearFiltered = byArea;
+          }
+          finalProducts = nearFiltered.slice(0, 4);
+        }
       }
     }
 
@@ -871,7 +1112,7 @@ class WorkflowEngine {
       }
 
       if (hasRequestedModel && finalProducts.length === 0) {
-        finalProducts = filteredProducts;
+        finalProducts = filteredProducts.slice(0, 1);
       } else if (!hasRequestedModel) {
         finalProducts = filteredProducts;
       }
@@ -1046,10 +1287,103 @@ class WorkflowEngine {
         };
       }
 
+      const entities = this.getEntitiesFromContext(context);
+      const requestedModel = (entities.model || entities.brand || '').toString().trim();
+      const isMoreOptions = context.lastIntent === 'more_options';
+
+      // When user said "got others?" / more options: show more bikes without "model first + alternative" framing (no intro reasoning)
+      if (isMoreOptions) {
+        const topN = node.config.top_n || 5;
+        const moreProducts = products.slice(0, topN);
+        if (process.env.DEBUG === 'true') console.log(`   [bike_ranker] more_options: returning ${moreProducts.length} additional options (no model-first framing)`);
+        return {
+          data: {
+            products: moreProducts,
+            recommendation_reasoning: '',
+            alternative_reasoning: '',
+            reasoning: 'More options within your criteria.',
+          },
+          tokensUsed: 0,
+          confidence: 0.9,
+        };
+      }
+
+      // When user specified a model (first search): show requested model first, then one alternative; if no exact match, show all near matches (e.g. same brand)
+      if (requestedModel) {
+        const modelMatches = products.filter(p => this.productMatchesRequestedModel(p, requestedModel));
+        const alternatives = products.filter(p => !this.productMatchesRequestedModel(p, requestedModel));
+        const altCount = modelMatches.length > 0 ? 1 : 4;
+        const ordered = [...modelMatches, ...alternatives.slice(0, altCount)];
+        if (process.env.DEBUG === 'true') {
+          console.log(`   [bike_ranker] Requested model: "${requestedModel}", model matches: ${modelMatches.length}, alternatives: ${ordered.length} (${modelMatches.length > 0 ? '1 alt' : 'near matches only'})`);
+        }
+
+        // AI-generated reasoning: when we have exact model match, explain first bike + alternative; when only near matches, one intro line
+        let recommendationReasoning = '';
+        let alternativeReasoning = '';
+        let reasoningTokensUsed = 0;
+        if (ordered.length > 0) {
+          if (modelMatches.length === 0) {
+            const lang = context.language || 'english';
+            if (lang === 'malay') recommendationReasoning = 'Kami tidak ada model tersebut; berikut pilihan yang hampir sama atau jenama yang sama.';
+            else if (lang === 'chinese') recommendationReasoning = '我们没有该型号；以下是相近或同品牌的选择。';
+            else recommendationReasoning = 'We don\'t have that exact model; here are similar or same-brand options that might suit you.';
+          } else {
+          try {
+            const lang = context.language || entities.language || 'english';
+            const budgetStr = entities.budget ? `RM ${entities.budget}` : 'your budget';
+            const firstBike = ordered[0];
+            const firstPrice = firstBike.price != null ? `MYR ${Number(firstBike.price).toLocaleString()}` : '';
+            const secondBike = ordered[1];
+            const systemPrompt = 'You are a friendly motorcycle sales assistant. Return JSON with two short sentences in the user\'s language (English, Malay, or Chinese): model_reasoning = why the first bike is shown (they asked for this model but it may be a bit above budget). alternative_reasoning = why the second bike is recommended (e.g. fits their budget and is available in their area). Keep each 1 sentence, warm and helpful.';
+            const userPrompt = `User's budget: ${budgetStr}. Area: ${entities.area || 'any'}. They asked for: ${requestedModel}. First bike: ${firstBike.name} (${firstPrice}). Second bike: ${secondBike ? secondBike.name + ' (MYR ' + Number(secondBike.price).toLocaleString() + ')' : 'none'}. Language: ${lang}. Return JSON: { "model_reasoning": "...", "alternative_reasoning": "..." }`;
+            const completion = await openai.chat.completions.create({
+              model: node.config.model || 'gpt-4o-mini',
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userPrompt },
+              ],
+              temperature: 0.3,
+              max_tokens: 150,
+              response_format: { type: 'json_object' },
+            });
+            reasoningTokensUsed = completion.usage?.total_tokens || 0;
+            const parsed = JSON.parse(completion.choices[0].message.content || '{}');
+            recommendationReasoning = (parsed.model_reasoning || '').trim();
+            alternativeReasoning = (parsed.alternative_reasoning || '').trim();
+          } catch (err) {
+            if (process.env.DEBUG === 'true') console.log('   [bike_ranker] Reasoning fallback:', err.message);
+            const lang = context.language || 'english';
+            if (lang === 'malay') {
+              recommendationReasoning = 'Berdasarkan model pilihan anda, saya jumpa padanan — harganya sedikit melebihi bajet.';
+              alternativeReasoning = 'Pilihan ini sesuai dengan bajet dan lokasi anda.';
+            } else if (lang === 'chinese') {
+              recommendationReasoning = '根据您选的型号我找到了匹配，但价格略超预算。';
+              alternativeReasoning = '下面这款在您预算内且您所在地区有货。';
+            } else {
+              recommendationReasoning = 'Based on your preferred model I found a match — it\'s a bit above your budget.';
+              alternativeReasoning = 'The option below fits your budget and is available in your area.';
+            }
+          }
+          }
+        }
+
+        return {
+          data: {
+            products: ordered,
+            recommendation_reasoning: recommendationReasoning,
+            alternative_reasoning: alternativeReasoning,
+            reasoning: modelMatches.length > 0
+              ? `Showing your preferred model first, plus one alternative within your budget and area.`
+              : `We don't have that model in stock; here's one option that fits your budget and location.`,
+          },
+          tokensUsed: reasoningTokensUsed,
+          confidence: 0.9,
+        };
+      }
+
       const systemPrompt = node.config.system_prompt || 
         "Rank products by relevance to user's requirements. Consider: budget match, area availability, model preference, specifications, user intent.";
-
-      const entities = context.lastResult?.data?.entities || {};
       const productsList = products.map((p, i) => {
         const features = p.features || {};
         const model = features.model || '';
@@ -1134,6 +1468,49 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
       }
     }
 
+    // Generic ML: nodes with system_prompt that return JSON (clarification_handler, smart_question_generator, no_results_handler)
+    if (node.config.system_prompt && node.config.next) {
+      try {
+        const systemPrompt = node.config.system_prompt;
+        let userContent = typeof userQuery === 'string' ? userQuery : String(context.user_message || '');
+        if (node.id === 'no_results_handler' && lastResult) {
+          const searchInfo = lastResult.entities || context.metadata?.entities || {};
+          userContent = `User's search had no results. They asked for: budget=${searchInfo.budget || 'any'}, area=${searchInfo.area || 'any'}, model=${searchInfo.model || 'any'}. User message: "${userContent}"`;
+        }
+        if (node.id === 'clarification_handler' && context.lastIntent) {
+          userContent = `Last intent: ${context.lastIntent}. User message: "${userContent}". What is missing: budget, area, or model? Ask for ONE thing in a friendly way.`;
+        }
+        const completion = await openai.chat.completions.create({
+          model: node.config.model || 'gpt-4o-mini',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userContent },
+          ],
+          temperature: node.config.temperature ?? 0.3,
+          max_tokens: node.config.max_tokens || 200,
+          response_format: { type: 'json_object' },
+        });
+        const content = JSON.parse(completion.choices[0].message.content);
+        const tokensUsed = completion.usage?.total_tokens || 0;
+        return {
+          data: { ...content },
+          tokensUsed,
+          confidence: content.confidence ?? 0.8,
+        };
+      } catch (err) {
+        console.error('ML node error (', node.id, '):', err.message);
+        const lang = context.language || 'english';
+        const fallback = node.id === 'no_results_handler'
+          ? { message: "Sorry, we don't have that right now. Would you like to try a different budget or area?" }
+          : { clarification_message: "To recommend the best bikes, please share your budget (e.g. RM 5,000), area (e.g. Puchong), and preferred model if any." };
+        return {
+          data: fallback,
+          tokensUsed: 0,
+          confidence: 0.3,
+        };
+      }
+    }
+
     // Default: no products found
     return {
       data: { products: [], reasoning: 'No results' },
@@ -1156,6 +1533,7 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
   handleFormatter(node, context) {
     const products = context.lastResult?.data?.products || [];
     const templateKey = node.config.template;
+    const lastIntent = context.lastIntent || context.lastResult?.data?.intent;
     const language = context.language || context.lastResult?.data?.language || 'english';
     const entities = this.getEntitiesFromContext(context);
     const modelPart = (entities.model || '').trim();
@@ -1166,9 +1544,15 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
       : brandPart.toLowerCase() === modelPart.toLowerCase() ? modelPart
       : `${brandPart} ${modelPart}`.trim();
 
-    // When showing bike recommendations: use "we don't have this model but have alternatives" if requested model not in list
+    // When showing bike recommendations: use "we don't have this model but have alternatives" if requested model not in list.
+    // BUT for "more_options" (user said "got others?"), we should not repeat "we don't have this model" – just show more bikes.
     let effectiveTemplateKey = templateKey;
-    if (templateKey === 'bike_recommendation' && requestedModel && products.length > 0) {
+    if (
+      templateKey === 'bike_recommendation' &&
+      requestedModel &&
+      products.length > 0 &&
+      lastIntent !== 'more_options'
+    ) {
       const hasRequestedModel = products.some(p => this.productMatchesRequestedModel(p, requestedModel));
       if (!hasRequestedModel && this.workflow.templates.no_model_alternatives) {
         effectiveTemplateKey = 'no_model_alternatives';
@@ -1190,8 +1574,13 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
       formatted = formatted.replace(/\{model\}/g, requestedModel);
     }
 
+    // Recommendation reasoning (AI-generated when user asked for a specific model: "model match a bit pricey, below one fits budget")
+    const recommendationReasoning = context.lastResult?.data?.recommendation_reasoning;
+    formatted = formatted.replace(/\{recommendation_reasoning\}\n?\n?/g, recommendationReasoning ? recommendationReasoning + '\n\n' : '\n');
+
     // Format products generically (avoid repeating model in title if already in product.name)
     if (products.length > 0) {
+      const alternativeReasoning = context.lastResult?.data?.alternative_reasoning;
       const productsText = products.map((product, i) => {
         const features = product.features || {};
         const model = features.model || '';
@@ -1201,7 +1590,11 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
         const engineSize = features.engineSize ? `${features.engineSize}cc` : '';
         const type = features.type || product.subcategory || '';
         const locations = features.locations ? ` (${features.locations.join(', ')})` : '';
-        return `${i + 1}. *${title}*\n   ${product.description || 'No description'}\n   Price: ${product.currency || 'MYR'} ${product.price?.toLocaleString() || product.price}${locations}\n   ${engineSize ? `Engine: ${engineSize}\n   ` : ''}${type ? `Type: ${type}\n   ` : ''}${product.inStock ? '✅ In Stock' : '❌ Out of Stock'}`;
+        const block = `${i + 1}. *${title}*\n   ${product.description || 'No description'}\n   Price: ${product.currency || 'MYR'} ${product.price?.toLocaleString() || product.price}${locations}\n   ${engineSize ? `Engine: ${engineSize}\n   ` : ''}${type ? `Type: ${type}\n   ` : ''}${product.inStock ? '✅ In Stock' : '❌ Out of Stock'}`;
+        if (i === 1 && alternativeReasoning) {
+          return `💡 ${alternativeReasoning}\n\n${block}`;
+        }
+        return block;
       }).join('\n\n');
       
       formatted = formatted.replace('{bikes}', productsText);
@@ -1216,6 +1609,17 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
       formatted = formatted.replace('{questions}', questions);
     }
 
+    // Replace placeholders from lastResult.data (e.g. clarification_message, message from ML nodes)
+    if (node.config.include_context && context.lastResult?.data && typeof context.lastResult.data === 'object') {
+      const data = context.lastResult.data;
+      for (const [key, value] of Object.entries(data)) {
+        if (value != null && key !== 'products' && key !== 'formatted' && key !== 'response') {
+          const str = typeof value === 'string' ? value : (Array.isArray(value) ? value.join('\n') : String(value));
+          formatted = formatted.replace(new RegExp('\\{' + key + '\\}', 'g'), str);
+        }
+      }
+    }
+
     // When no products, placeholder might be empty; still pass formatted so downstream can use it
     if (products.length === 0 && (formatted.includes('{bikes}') || formatted.includes('{products}'))) {
       formatted = formatted.replace(/\{bikes\}\s*/g, '').replace(/\{products\}\s*/g, '').trim();
@@ -1226,25 +1630,66 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
     };
   }
 
-  handleOptimizer(node, context) {
-    let response = context.lastResult?.data?.formatted || '';
-    
-    // Simple optimization: remove extra whitespace, compress
-    response = response.replace(/\n{3,}/g, '\n\n').trim();
-    
-    // Check token count (rough estimate: 1 token ≈ 4 characters)
-    const estimatedTokens = Math.ceil(response.length / 4);
-    const maxTokens = node.config.max_tokens || 500;
-    
-    if (estimatedTokens > maxTokens) {
-      // Truncate if too long
-      response = response.substring(0, maxTokens * 4) + '...';
+  async handleOptimizer(node, context) {
+    // Take whatever the previous node formatted as the bot reply
+    let response = context.lastResult?.data?.formatted ||
+                   context.lastResult?.data?.response ||
+                   context.lastResult?.data?.finalResponse ||
+                   '';
+    response = (response || '').toString().trim();
+
+    const lastIntent = context.lastIntent || context.lastResult?.data?.intent;
+    const isGreetingFlow = lastIntent === 'greeting' || context.lastResult?.data?.intent === 'greeting';
+    const isLanguageSelectionFlow = context.lastResult?.data?.needLanguageChoice === true;
+
+    // For pure template messages (greeting and language selection), skip OpenAI to avoid token usage
+    if (!response || isGreetingFlow || isLanguageSelectionFlow) {
+      // Simple whitespace cleanup only, no tokens
+      const cleaned = response.replace(/\n{3,}/g, '\n\n').trim();
+      return {
+        data: { optimized: cleaned, finalResponse: cleaned },
+        tokensUsed: 0,
+      };
     }
 
-    return {
-      data: { optimized: response },
-      tokensUsed: 0,
-    };
+    const systemPrompt = node.config.system_prompt ||
+      'You are a friendly sales assistant. Rewrite the reply to sound natural, clear and concise.';
+
+    try {
+      const completion = await openai.chat.completions.create({
+        model: node.config.model || 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: response },
+        ],
+        temperature: node.config.temperature ?? TOKEN_CONFIG.TEMPERATURE.STRICT,
+        max_tokens: node.config.max_tokens || 600,
+      });
+
+      const optimized = (completion.choices[0].message.content || '').trim();
+      const tokensUsed = completion.usage?.total_tokens || 0;
+
+      // Fallback to original if something went wrong with content
+      const finalText = optimized || response;
+
+      return {
+        data: { optimized: finalText, finalResponse: finalText },
+        tokensUsed,
+      };
+    } catch (error) {
+      console.error('[Optimizer] Error optimizing response:', error.message);
+      // Fallback to old simple trimming behavior
+      let fallback = response.replace(/\n{3,}/g, '\n\n').trim();
+      const estimatedTokens = Math.ceil(fallback.length / 4);
+      const maxTokens = node.config.max_tokens || 600;
+      if (estimatedTokens > maxTokens) {
+        fallback = fallback.substring(0, maxTokens * 4) + '...';
+      }
+      return {
+        data: { optimized: fallback, finalResponse: fallback },
+        tokensUsed: 0,
+      };
+    }
   }
 
   async handleHandler(node, context) {
@@ -1281,6 +1726,8 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
         formatted: response,
         // Also set as finalResponse for easier extraction
         finalResponse: response,
+        // Mark greeting so optimizer keeps the structured 3-item message (no rewrite)
+        ...(templateKey === 'greeting' ? { intent: 'greeting' } : {}),
       },
       tokensUsed: 0,
     };
