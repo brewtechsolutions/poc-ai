@@ -274,18 +274,35 @@ class SearchAgent {
     const userQuery = context.user_message;
 
     if (node.id === 'context_collector') {
-      const entities = this.getEntitiesFromContext(context);
-      const hasBudget = !!(entities.budget || entities.price_range);
-      const hasArea = !!(entities.area || entities.location);
-      const contextComplete = hasBudget && hasArea;
+      // Merge entities across turns: previous session context + latest NLP entities
+      const mergedEntities = this.getEntitiesFromContext(context);
+      const hasBudget = !!(
+        mergedEntities.budget ||
+        mergedEntities.price_range ||
+        context.metadata?.budget
+      );
+      const hasArea = !!(mergedEntities.area || mergedEntities.location);
+
+      // UX: if user already gave a budget, we treat it as "good enough"
+      // to show recommendations first, then ask for area/preferences later.
+      const contextComplete = hasBudget || (hasBudget && hasArea);
+      const recommendationMode = hasBudget && !hasArea ? 'budget_only' : 'full';
+
       if (process.env.DEBUG === 'true') {
-        console.log(`   [ML/context_collector] contextComplete=${contextComplete}, hasBudget=${hasBudget}, hasArea=${hasArea}`);
+        console.log(
+          `   [ML/context_collector] contextComplete=${contextComplete}, hasBudget=${hasBudget}, hasArea=${hasArea}, mode=${recommendationMode}`,
+        );
       }
+
+      // Persist merged entities back into context for downstream nodes
+      context.entities = mergedEntities;
+
       return {
         data: {
           ...lastResult,
-          entities,
+          entities: mergedEntities,
           contextComplete,
+          recommendationMode,
         },
         tokensUsed: 0,
         confidence: contextComplete ? 0.95 : 0.5,
@@ -557,13 +574,23 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
   /** Get entities from most recent result in context (local copy). */
   static getEntitiesFromContext(context) {
     const results = context.allResults || [];
+    let latestEntities = null;
     for (let i = results.length - 1; i >= 0; i--) {
       const entities = results[i]?.data?.entities;
       if (entities && typeof entities === 'object' && Object.keys(entities).length > 0) {
-        return entities;
+        latestEntities = entities;
+        break;
       }
     }
-    return context.lastResult?.data?.entities || {};
+
+    const base =
+      context.entities ||
+      context.metadata?.entities ||
+      context.lastResult?.data?.entities ||
+      {};
+
+    // Merge new entities (from latest NLP/search step) on top of existing ones
+    return latestEntities ? { ...base, ...latestEntities } : base;
   }
 
   /** Local helper to match a product against a requested model/brand. */

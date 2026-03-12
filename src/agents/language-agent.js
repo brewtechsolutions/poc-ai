@@ -178,6 +178,16 @@ class LanguageAgent {
     const lower = message.toLowerCase().trim();
     const trimmed = message.trim();
 
+    // Look at recent conversation to understand short replies like "想", "要", "ok"
+    const history = Array.isArray(context.conversationHistory) ? context.conversationHistory : [];
+    let lastBotMessage = null;
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      if (history[i] && history[i].role === 'assistant' && typeof history[i].content === 'string') {
+        lastBotMessage = history[i].content;
+        break;
+      }
+    }
+
     // If user sends a first message that clearly looks like a budget statement,
     // don't treat it as a greeting. Force bike_recommendation so we go straight
     // into the search flow instead of showing the greeting template again.
@@ -235,6 +245,86 @@ class LanguageAgent {
       // by falling through to the rest of the rules.
     }
 
+    // Positive one-word replies like "想", "要", "ok", "yes" that depend on the previous bot question.
+    // Example: bot asked "你想知道更多细节吗？" and user replies "想" -> intent should be "more_details".
+    if (trimmed.length > 0 && trimmed.length <= 8) {
+      const positiveReplies = [
+        'yes',
+        'ok',
+        'okay',
+        'ya',
+        'ya lah',
+        'boleh',
+        'baik',
+        '是',
+        '好',
+        '想',
+        '要',
+        '准备好了',
+        '好了',
+        '我要',
+        '我想要',
+        'ready',
+        'dah ready',
+        '嗯',
+        '可以',
+      ];
+      const negativeReplies = [
+        'no',
+        'nope',
+        'tak',
+        'tidak',
+        'bukan',
+        '不要',
+        '不用',
+        '不要了',
+      ];
+
+      const isPositive = positiveReplies.includes(lower) || positiveReplies.includes(trimmed);
+      const isNegative = negativeReplies.includes(lower) || negativeReplies.includes(trimmed);
+
+      if (isPositive || isNegative) {
+        const lastIntent = context.lastIntent || context.lastResult?.data?.intent;
+        let followUpIntent = null;
+
+        // If the last turn was a recommendation or a clarification about a product,
+        // treat a positive reply as a request for more details.
+        const lastBotAskedForDetails =
+          typeof lastBotMessage === 'string' &&
+          /more detail|full spec|maklumat lanjut|详细|更多细节|更多资料/i.test(lastBotMessage);
+
+        if (isPositive && (lastIntent === 'bike_recommendation' || lastIntent === 'model_selection' || lastBotAskedForDetails)) {
+          followUpIntent = 'more_details';
+        } else if (isPositive && lastIntent) {
+          // Generic: inherit last intent if we don't have a better guess.
+          followUpIntent = lastIntent;
+        } else if (isNegative && lastIntent === 'more_details') {
+          // User declined more details; treat as a soft goodbye.
+          followUpIntent = 'goodbye';
+        }
+
+        if (followUpIntent) {
+          if (process.env.DEBUG === 'true') {
+            console.log(
+              `   [NLP] Short ${isPositive ? 'positive' : 'negative'} reply "${trimmed}" -> follow-up intent: ${followUpIntent}`,
+            );
+          }
+          return {
+            data: {
+              intent: followUpIntent,
+              entities: {},
+              language: context.language || 'english',
+              confidence: 0.9,
+              requires_product_search: followUpIntent === 'more_details',
+              requires_agent_escalation: false,
+            },
+            tokensUsed: 0,
+            confidence: 0.9,
+          };
+        }
+      }
+    }
+
     // "got others?" / "show all models" -> more options
     if (
       /got others?|any others?|more options?|show more|other (bikes?|options?|suggestions?)|ada lain|还有别的|其他(的)?(选择|推荐)?/i.test(
@@ -282,7 +372,9 @@ class LanguageAgent {
     }
 
     // "arrange"/test ride
-    const arrangeOrTestRide = /\barrange\b/i.test(lower) || /arrange (a )?test ride|book (a )?test ride|test ride|ujian memandu|预约试驾|试驾/i.test(lower);
+    const arrangeOrTestRide =
+      /\barrange\b/i.test(lower) ||
+      /arrange (a )?test ride|book (a )?test ride|test ride|ujian memandu|预约试驾|试驾/i.test(lower);
     if (arrangeOrTestRide && lower.length < 80) {
       if (process.env.DEBUG === 'true') console.log(`   [NLP] Arrange / test ride keyword -> test_ride_request`);
       return {
@@ -299,7 +391,66 @@ class LanguageAgent {
       };
     }
 
-    // Content words -> agent_request
+    // "I'm ready" / "准备好了" -> user confirms they are ready to proceed with test ride / booking.
+    // This uses both explicit phrases and the previous bot message ("ready, tell us" pattern).
+    const readyPhrases = [
+      '我准备好了',
+      '准备好了',
+      '好了',
+      "i am ready",
+      "i'm ready",
+      'im ready',
+      'ready',
+      'sedia',
+      'dah ready',
+      'dah sedia',
+    ];
+    const lastBotAskedReady =
+      typeof lastBotMessage === 'string' &&
+      /准备好就告诉|ready.*tell|sedia.*beritahu|book|预约|test.?ride|试驾/i.test(lastBotMessage);
+
+    if (
+      readyPhrases.some(p => lower.includes(p.toLowerCase())) ||
+      (lastBotAskedReady && /ready|准备|好了|sedia/i.test(lower))
+    ) {
+      if (process.env.DEBUG === 'true') {
+        console.log(`   [NLP] Ready confirmation detected -> test_ride_booking`);
+      }
+      return {
+        data: {
+          intent: 'test_ride_booking',
+          entities: context.entities || {},
+          language: context.language || 'english',
+          confidence: 0.95,
+          requires_product_search: false,
+          requires_agent_escalation: false,
+        },
+        tokensUsed: 0,
+        confidence: 0.95,
+      };
+    }
+
+    // Direct agent keywords -> immediate agent_request (bypass LLM)
+    const agentKeywords = /\bagent\b|客服|找客服|真人|人工|转人工/i;
+    if (agentKeywords.test(lower)) {
+      if (process.env.DEBUG === 'true') {
+        console.log(`   [NLP] Agent keyword detected -> agent_request`);
+      }
+      return {
+        data: {
+          intent: 'agent_request',
+          entities: {},
+          language: context.language || 'english',
+          confidence: 0.95,
+          requires_product_search: false,
+          requires_agent_escalation: true,
+        },
+        tokensUsed: 0,
+        confidence: 0.95,
+      };
+    }
+
+    // Configured escalation content words -> agent_request
     const agentNode = nodes.get('agent_escalation');
     const contentWords = (agentNode?.config?.content_words || [])
       .map(w => String(w).trim().toLowerCase())
@@ -456,14 +607,57 @@ class LanguageAgent {
       }
     }
 
+    // "但是我在X" / "i'm in X" / "i am at X" -> location refinement
+    const locationMatch =
+      message.match(
+        /(?:我在|我住在|我是在|but i(?:'m| am) (?:in|at|from))\s*([a-zA-Z\u4e00-\u9fff][a-zA-Z\u4e00-\u9fff\s]{1,30})/i,
+      ) ||
+      message.match(
+        /(?:i(?:'m| am) (?:in|at|from)|staying in|based in|located in)\s+([a-zA-Z][a-zA-Z\s]{1,30})/i,
+      ) ||
+      message.match(
+        /(?:but|tapi|但是)?\s*(?:i(?:'m| am) in|我在|在)\s*([a-zA-Z\u4e00-\u9fff][a-zA-Z\u4e00-\u9fff\s]{1,20})/i,
+      );
+
+    if (locationMatch && locationMatch[1]) {
+      const area = locationMatch[1].trim();
+      const baseEntities =
+        context.lastResult?.data?.entities ||
+        context.entities ||
+        context.metadata?.entities ||
+        {};
+      if (process.env.DEBUG === 'true') {
+        console.log(`   [NLP] Location refinement detected: area=${area}`);
+      }
+      return {
+        data: {
+          intent: 'bike_recommendation',
+          entities: {
+            ...baseEntities, // keep existing budget/model/etc.
+            area,
+            location: area,
+          },
+          language: context.language || 'english',
+          confidence: 0.92,
+          requires_product_search: true,
+          requires_agent_escalation: false,
+        },
+        tokensUsed: 0,
+        confidence: 0.92,
+      };
+    }
+
     // Fallback: call OpenAI for structured extraction
     const baseLang = context.language || 'english';
     const systemPrompt =
       `You must respond ONLY in ${baseLang}. Never switch languages.\n\n` +
       (node.config.system_prompt ||
-        'You are a sales assistant. Extract intent, language and entities from user messages.');
+        'You are a sales assistant. Extract intent, language and entities from user messages. Always return JSON.');
 
-    const userPrompt = `Extract intent, language and entities from this message: "${message}"\n\nReturn JSON with: language (english/malay/chinese), intent, entities (object), confidence (0-1), requires_product_search (boolean), requires_agent_escalation (boolean)`;
+    const historyPrefix = lastBotMessage
+      ? `Previous assistant message: "${lastBotMessage}".\n\n`
+      : '';
+    const userPrompt = `${historyPrefix}Extract intent, language and entities from this user reply: "${message}"\n\nReturn JSON with: language (english/malay/chinese), intent, entities (object), confidence (0-1), requires_product_search (boolean), requires_agent_escalation (boolean)`;
 
     try {
       if (process.env.DEBUG === 'true') {

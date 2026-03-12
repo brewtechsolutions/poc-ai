@@ -595,20 +595,26 @@ class WorkflowEngine {
       return await SearchAgent.handleML(node, context, this.workflow);
     }
 
-    // Context collector: if user already gave budget + area, go to bike_search (routing via config.next_complete in getNextNode)
+    // Context collector: legacy path (kept for compatibility). The real logic lives in SearchAgent.handleML.
     if (node.id === 'context_collector') {
       const entities = this.getEntitiesFromContext(context);
       const hasBudget = !!(entities.budget || entities.price_range);
       const hasArea = !!(entities.area || entities.location);
-      const contextComplete = hasBudget && hasArea;
+      const contextComplete = hasBudget || (hasBudget && hasArea);
+      const recommendationMode = hasBudget && !hasArea ? 'budget_only' : 'full';
+
       if (process.env.DEBUG === 'true') {
-        console.log(`   [ML/context_collector] contextComplete=${contextComplete}, hasBudget=${hasBudget}, hasArea=${hasArea}`);
+        console.log(
+          `   [ML/context_collector] contextComplete=${contextComplete}, hasBudget=${hasBudget}, hasArea=${hasArea}, mode=${recommendationMode}`,
+        );
       }
+
       return {
         data: {
           ...lastResult,
           entities,
           contextComplete,
+          recommendationMode,
         },
         tokensUsed: 0,
         confidence: contextComplete ? 0.95 : 0.5,

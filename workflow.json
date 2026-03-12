@@ -80,6 +80,7 @@
               "model_question",
               "specification_question",
               "test_ride_request",
+              "test_ride_booking",
               "financing_question",
               "trade_in_question",
               "complaint",
@@ -158,6 +159,10 @@
             },
             {
               "intent": "test_ride_request",
+              "next": "test_ride_info_handler"
+            },
+            {
+              "intent": "test_ride_booking",
               "next": "test_ride_handler"
             },
             {
@@ -175,6 +180,11 @@
             },
             {
               "intent": "agent_request",
+              "next": "agent_escalation",
+              "priority": "medium"
+            },
+            {
+              "intent": "agent_escalation",
               "next": "agent_escalation",
               "priority": "medium"
             },
@@ -221,7 +231,7 @@
           "model": "gpt-4o-mini",
           "temperature": 0.4,
           "max_tokens": 200,
-          "system_prompt": "Generate a natural, friendly question in the user's language (Malay/Chinese/English) to ask for missing information. Sound like a real Malaysian salesperson chatting on WhatsApp: short sentences, simple words, and warm tone. You can use light particles like 'lah', 'ya', 'meh' when natural in Malay or English, but do not use them in Chinese. Avoid sounding robotic or too formal. Return JSON with: question (string), question_type (budget/area/model/other), language (same as user).",
+          "system_prompt": "You are a motorcycle sales assistant for MotorShop Malaysia. You ONLY sell motorcycles/bikes and related services. Never mention houses, property, cars, or unrelated products. Based on the conversation context and what is still missing (especially budget in RM, area/location like Puchong, and preferred model/brand), generate ONE natural, friendly follow-up question in the user's language (Malay/Chinese/English) that clearly asks for the missing MOTORCYCLE information. Sound like a real Malaysian salesperson chatting on WhatsApp: short sentences, simple words, and warm tone. You can use light particles like 'lah', 'ya', 'meh' when natural in Malay or English, but do not use them in Chinese. Avoid sounding robotic or too formal. Return JSON with: question (string), question_type (budget/area/model/other), language (same as user).",
           "next": "question_formatter"
         }
       },
@@ -365,13 +375,23 @@
         }
       },
       {
-        "id": "test_ride_handler",
+        "id": "test_ride_info_handler",
         "type": "handler",
-        "name": "Arrange Test Ride",
+        "name": "Test Ride Info",
         "config": {
           "template": "test_ride_info",
           "language_aware": true,
           "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "test_ride_handler",
+        "type": "handler",
+        "name": "Arrange Test Ride",
+        "config": {
+          "template": "test_ride_booking_confirm",
+          "language_aware": true,
+          "next": "agent_escalation"
         }
       },
       {
@@ -485,6 +505,15 @@
             "user_insists === true"
           ],
           "content_words": [
+            "客服",
+            "找客服",
+            "真人",
+            "人工",
+            "转人工",
+            "我要找客服",
+            "sambung ke ejen",
+            "cakap dengan orang",
+            "orang sebenar",
             "i'm ready",
             "im ready",
             "i am ready",
@@ -625,6 +654,11 @@
         "malay": "Hai! Saya di sini untuk membantu anda mencari motosikal impian anda. Apakah jenis motosikal yang anda cari?",
         "chinese": "你好！我在这里帮您找到您梦想的摩托车。您在寻找什么类型的摩托车？"
       },
+      "smart_question": {
+        "english": "{question}",
+        "malay": "{question}",
+        "chinese": "{question}"
+      },
       "bike_recommendation": {
         "english": "Based on your requirements, here are my top recommendations:\n\n{recommendation_reasoning}\n\n{bikes}\n\nWould you like more details on any of these?",
         "malay": "Berdasarkan keperluan anda, berikut adalah cadangan teratas saya:\n\n{recommendation_reasoning}\n\n{bikes}\n\nAdakah anda ingin maklumat lanjut mengenai mana-mana motosikal ini?",
@@ -696,9 +730,14 @@
         "chinese": "我们有来自各种品牌的各种型号。您在寻找特定品牌或型号吗？或者您想让我根据您的需求推荐？"
       },
       "test_ride_info": {
-        "english": "**Arrange a test ride** 🏍️\n\nOur team will help you pick a *booking slot* that suits you. A real agent will confirm available slots and get you scheduled.\n\n*Deposit instruction:*\nA refundable deposit may be required to secure your test ride. Our agent will explain the amount and payment method when they confirm your slot.\n\nWhen you're ready, say so and we’. we’ll connect you with an agent to choose your slot.",
-        "malay": "**Atur ujian memandu** 🏍️\n\nPasukan kami akan bantu anda pilih *slot tempahan* yang sesuai. Ejen kami akan sahkan slot yang ada dan jadualkan anda.\n\n*Arahan deposit:*\nDeposit yang boleh dikembalikan mungkin diperlukan untuk mengesahkan ujian memandu anda. Ejen kami akan terangkan jumlah dan kaedah bayaran apabila slot anda disahkan.\n\nApabila anda bersedia, beritahu kami dan kami akan sambungkan anda dengan ejen untuk pilih slot.",
-        "chinese": "**预约试驾** 🏍️\n\n我们的团队会帮您选择*预约时段*。会有专人确认可预约时段并为您安排。\n\n*定金说明：*\n预约试驾可能需要支付可退还定金。专人确认时段时会说明金额与付款方式。\n\n当您准备好时告诉我们，我们会安排专人为您选时段。"
+        "english": "**Arrange a test ride** 🏍️\n\nOur team can help you pick a booking slot that suits you and confirm availability.\n\nA refundable deposit may be required to secure your test ride — our agent will explain the amount and payment method.\n\nWhen you're ready, just tell me \"I'm ready\" and I'll connect you with an agent to finalize the booking.",
+        "malay": "**Atur ujian memandu** 🏍️\n\nPasukan kami boleh bantu anda pilih slot tempahan yang sesuai dan sahkan ketersediaan.\n\nDeposit yang boleh dikembalikan mungkin diperlukan untuk mengesahkan ujian memandu anda — ejen kami akan terangkan jumlah dan cara bayaran.\n\nBila anda sudah bersedia, beritahu saya \"saya dah ready\" dan saya akan sambungkan anda dengan ejen untuk sahkan tempahan.",
+        "chinese": "**预约试驾** 🏍️\n\n我们的团队可以帮您选择合适的试驾时段并确认有没有位置。\n\n预约试驾可能需要支付可退还定金，专人会为您说明金额和付款方式。\n\n当您准备好时跟我说「我准备好了」，我会帮您转接人工为您确认预约。"
+      },
+      "test_ride_booking_confirm": {
+        "english": "Great, let's get you booked! 🏍️ I'm connecting you with our team now to confirm your test ride slot. A refundable deposit may be required — our agent will explain the amount and payment method.",
+        "malay": "Bagus, jom tempah! 🏍️ Saya sedang sambungkan anda dengan pasukan kami untuk sahkan slot ujian memandu anda. Deposit yang boleh dikembalikan mungkin diperlukan — ejen kami akan terangkan jumlah dan cara bayaran.",
+        "chinese": "好的，我们现在为您连接团队来确认试驾时段！🏍️ 可能需要支付可退还定金，专人会为您说明金额和付款方式。"
       }
     },
     "settings": {
