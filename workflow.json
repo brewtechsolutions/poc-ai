@@ -10,8 +10,27 @@
         "name": "Message Received",
         "config": {
           "input": "user_message",
-          "metadata": ["phone_number", "message_type", "timestamp", "media_url", "voice_url"],
-          "next": "message_classifier"
+          "metadata": ["phone_number", "message_type", "timestamp", "media_url", "voice_url", "language"],
+          "next": "language_selector"
+        }
+      },
+      {
+        "id": "language_selector",
+        "type": "language_selector",
+        "name": "Language Gate",
+        "config": {
+          "next_if_set": "message_classifier",
+          "next_after_select": "greeting_handler",
+          "next_prompt": "language_selection_prompt"
+        }
+      },
+      {
+        "id": "language_selection_prompt",
+        "type": "handler",
+        "name": "Ask Language",
+        "config": {
+          "template": "language_choice",
+          "next": "response_optimizer"
         }
       },
       {
@@ -46,18 +65,22 @@
           "model": "gpt-4o-mini",
           "temperature": 0.2,
           "max_tokens": 200,
-          "system_prompt": "You are a motorcycle sales assistant. Detect the language (Malay, Chinese, English) and extract intent from the user message. Return JSON with: language (malay/chinese/english), intent, entities, confidence (0-1), requires_budget_info, requires_area_info, requires_model_info.",
+          "system_prompt": "You are a motorcycle sales assistant. Detect the language (Malay, Chinese, English) and extract intent from the user message. If the user replies with only budget, area/location and maybe model (e.g. \"RM 5,000, Puchong, Yamaha Ego S\"), classify as bike_recommendation and fill entities. If the user asks for other options, more bikes, alternatives, or \"got others?\" / \"any others?\" / \"show more\", classify as more_options. If the user asks for more detail, full specs, or \"tell me more\" about a product, classify as more_details. If the user selects a model by number (1, 2, 3) or by name (e.g. Yamaha Ego S 125), classify as model_selection. Return JSON with: language (malay/chinese/english), intent, entities, confidence (0-1), requires_budget_info, requires_area_info, requires_model_info.",
           "extract": {
             "intents": [
               "greeting",
               "bike_inquiry",
               "bike_recommendation",
+              "more_options",
+              "more_details",
+              "model_selection",
               "price_inquiry",
               "budget_question",
               "area_question",
               "model_question",
               "specification_question",
               "test_ride_request",
+              "test_ride_booking",
               "financing_question",
               "trade_in_question",
               "complaint",
@@ -77,7 +100,7 @@
               "urgency"
             ]
           },
-          "confidence_threshold": 0.7,
+          "confidence_threshold": 0.5,
           "next_high_confidence": "intent_router",
           "next_low_confidence": "clarification_handler"
         }
@@ -136,6 +159,10 @@
             },
             {
               "intent": "test_ride_request",
+              "next": "test_ride_info_handler"
+            },
+            {
+              "intent": "test_ride_booking",
               "next": "test_ride_handler"
             },
             {
@@ -157,8 +184,26 @@
               "priority": "medium"
             },
             {
+              "intent": "agent_escalation",
+              "next": "agent_escalation",
+              "priority": "medium"
+            },
+            {
               "intent": "goodbye",
               "next": "goodbye_handler"
+            },
+            {
+              "intent": "more_options",
+              "next": "bike_search",
+              "requires_context": "use_last_search"
+            },
+            {
+              "intent": "more_details",
+              "next": "more_details_handler"
+            },
+            {
+              "intent": "model_selection",
+              "next": "model_details_handler"
             }
           ],
           "fallback": "clarification_handler"
@@ -173,8 +218,9 @@
           "temperature": 0.3,
           "max_tokens": 300,
           "system_prompt": "Analyze the user's motorcycle inquiry. Determine what information is missing: budget, area/location, preferred model/brand, bike type (sport, cruiser, scooter, etc), engine size (cc), new/used preference. Return JSON with: missing_info (array), has_budget (boolean), has_area (boolean), has_model (boolean), should_ask_budget (boolean), should_ask_area (boolean), should_ask_model (boolean), reasoning.",
+          "next_complete": "bike_search",
           "next_missing_info": "smart_question_generator",
-          "next_complete": "bike_search"
+          "fallback": "clarification_handler"
         }
       },
       {
@@ -185,7 +231,7 @@
           "model": "gpt-4o-mini",
           "temperature": 0.4,
           "max_tokens": 200,
-          "system_prompt": "Generate a natural, friendly question in the user's language (Malay/Chinese/English) to ask for missing information. Be conversational and helpful. Return JSON with: question (string), question_type (budget/area/model/other), language (same as user).",
+          "system_prompt": "You are a motorcycle sales assistant for MotorShop Malaysia. You ONLY sell motorcycles/bikes and related services. Never mention houses, property, cars, or unrelated products. Based on the conversation context and what is still missing (especially budget in RM, area/location like Puchong, and preferred model/brand), generate ONE natural, friendly follow-up question in the user's language (Malay/Chinese/English) that clearly asks for the missing MOTORCYCLE information. Sound like a real Malaysian salesperson chatting on WhatsApp: short sentences, simple words, and warm tone. You can use light particles like 'lah', 'ya', 'meh' when natural in Malay or English, but do not use them in Chinese. Avoid sounding robotic or too formal. Return JSON with: question (string), question_type (budget/area/model/other), language (same as user).",
           "next": "question_formatter"
         }
       },
@@ -212,6 +258,9 @@
             "inStock": true
           },
           "limit": 15,
+          "more_options_limit": 10,
+          "fallback_limit": 5,
+          "alternatives_limit": 5,
           "similarity_threshold": 0.7,
           "use_embeddings": true,
           "next_found": "bike_ranker",
@@ -221,12 +270,12 @@
       {
         "id": "bike_ranker",
         "type": "ml",
-        "name": "Smart Product Ranker",
+        "name": "Sales Analysis Agent",
         "config": {
           "model": "gpt-4o-mini",
           "temperature": 0.2,
           "max_tokens": 400,
-          "system_prompt": "Rank products by relevance to user's requirements. Consider: budget match, area availability, model preference, specifications, user intent. Provide detailed reasoning. Return JSON with: products (array with id, relevance_score, reasoning), overall_reasoning, confidence.",
+          "system_prompt": "You are a motorcycle sales analysis agent. Based on the conversation context and the list of candidate products, analyze the user's message (budget, area/location, preferred model/brand, bike type, cc, new/used) and decide which products are the best fit. Consider: budget match, area availability, model preference, specifications, user intent, and popularity. Provide clear sales-focused reasoning. Return JSON with: products (array with id, relevance_score, reasoning), overall_reasoning, confidence.",
           "ranking_factors": [
             "budget_match",
             "area_availability",
@@ -326,13 +375,23 @@
         }
       },
       {
-        "id": "test_ride_handler",
+        "id": "test_ride_info_handler",
         "type": "handler",
-        "name": "Test Ride Handler",
+        "name": "Test Ride Info",
         "config": {
           "template": "test_ride_info",
           "language_aware": true,
           "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "test_ride_handler",
+        "type": "handler",
+        "name": "Arrange Test Ride",
+        "config": {
+          "template": "test_ride_booking_confirm",
+          "language_aware": true,
+          "next": "agent_escalation"
         }
       },
       {
@@ -369,24 +428,67 @@
       },
       {
         "id": "clarification_handler",
-        "type": "handler",
-        "name": "Clarification Handler",
+        "type": "ml",
+        "name": "Contextual Clarification",
         "config": {
+          "model": "gpt-4o-mini",
+          "temperature": 0.3,
+          "max_tokens": 150,
           "max_clarifications": 2,
-          "template": "clarification_questions",
+          "system_prompt": "You are a motorcycle sales assistant. The user's message was unclear or we need one more detail. Based on the conversation context, last intent, and what is missing (budget, area/location, model/brand, or something else), generate ONE short, friendly clarification question in the user's language (Malay/Chinese/English). Be specific when possible (e.g. 'Just to confirm, is your budget in RM?' or 'You said Puchong – did you mean our Puchong branch?'). Return JSON with: clarification_message (string), language (malay/chinese/english).",
+          "next": "clarification_formatter"
+        }
+      },
+      {
+        "id": "clarification_formatter",
+        "type": "formatter",
+        "name": "Clarification Formatter",
+        "config": {
+          "template": "clarification_dynamic",
+          "include_context": true,
           "language_aware": true,
           "next": "response_optimizer"
         }
       },
       {
         "id": "no_results_handler",
-        "type": "handler",
-        "name": "No Results Handler",
+        "type": "ml",
+        "name": "No Results Explainer",
         "config": {
-          "template": "no_results",
-          "suggest_alternatives": true,
-          "offer_agent": true,
+          "model": "gpt-4o-mini",
+          "temperature": 0.3,
+          "max_tokens": 250,
+          "system_prompt": "You are a motorcycle sales assistant. The user's search returned no results. Use the context: what they asked for (budget, area, model), and why nothing matched. Write a short, helpful response in the user's language (Malay/Chinese/English) that: 1) Briefly explains why there were no results (e.g. no bikes in that budget in that area, or we don't have that model). 2) Suggests 2–3 concrete next steps (e.g. try a different budget/area, ask for similar models we have). 3) Offers to connect them with the team if they want. Keep it concise and friendly. Return JSON with: message (string, the full response).",
+          "next": "no_results_formatter"
+        }
+      },
+      {
+        "id": "no_results_formatter",
+        "type": "formatter",
+        "name": "No Results Formatter",
+        "config": {
+          "template": "no_results_ai",
+          "include_context": true,
           "language_aware": true,
+          "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "more_details_handler",
+        "type": "handler",
+        "name": "More Details / Suggestions",
+        "config": {
+          "template": "more_details_prompt",
+          "language_aware": true,
+          "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "model_details_handler",
+        "type": "model_details",
+        "name": "Selected Model Details",
+        "config": {
+          "template": "model_detail_full",
           "next": "response_optimizer"
         }
       },
@@ -401,6 +503,31 @@
             "intent === 'agent_request'",
             "complex_query === true",
             "user_insists === true"
+          ],
+          "content_words": [
+            "客服",
+            "找客服",
+            "真人",
+            "人工",
+            "转人工",
+            "我要找客服",
+            "sambung ke ejen",
+            "cakap dengan orang",
+            "orang sebenar",
+            "i'm ready",
+            "im ready",
+            "i am ready",
+            "ready",
+            "connect me",
+            "connect me to agent",
+            "talk to agent",
+            "speak to agent",
+            "speak to someone",
+            "talk to someone",
+            "human agent",
+            "real person",
+            "yes connect",
+            "yes please connect"
           ],
           "priority": "auto-assign",
           "notify_agent": true,
@@ -469,11 +596,14 @@
         "type": "optimizer",
         "name": "Response Token Optimizer",
         "config": {
+          "model": "gpt-4o-mini",
+          "temperature": 0.2,
           "max_tokens": 600,
           "optimize_for": "whatsapp",
           "remove_redundancy": true,
           "compress_while_clear": true,
           "language_aware": true,
+          "system_prompt": "Rewrite the following bot response so it sounds like a real human salesperson chatting on WhatsApp in the same language. Make it friendly, casual, clear, and concise. Use a natural Malaysian tone: short sentences, simple words, and a warm, helpful vibe. You can use light particles like 'lah', 'ya', or 'meh' when natural in Malay or English, but do not use them in Chinese. Keep all important information: prices, product names, numbers, links, and key details. Avoid corporate or robotic phrasing. Output only the rewritten message, no explanation or preamble.",
           "next": "response_sender"
         }
       },
@@ -509,30 +639,70 @@
       }
     ],
     "templates": {
+      "language_choice": {
+        "english": "Hey there! 👋\n\nJust let me know which language you’re more comfortable with, ya?\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\nYou can just reply with 1, 2, or 3.",
+        "malay": "Hai! 👋\n\nBeritahu saya bahasa mana yang anda lebih selesa guna ya?\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\nAnda boleh balas dengan 1, 2, atau 3 sahaja.",
+        "chinese": "嗨～👋\n\n跟我说你比较习惯用哪一种语言：\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\n直接回复 1、2 或 3 就可以了。"
+      },
       "greeting": {
-        "english": "Hello! 👋 Welcome to MotorShop! I'm your AI motorcycle assistant. I can help you find the perfect bike based on your budget, location, and preferences. How can I assist you today?",
-        "malay": "Hello! 👋 Selamat datang ke MotorShop! Saya pembantu AI motosikal anda. Saya boleh membantu anda mencari motosikal yang sesuai berdasarkan bajet, lokasi, dan pilihan anda. Bagaimana saya boleh membantu?",
-        "chinese": "你好！👋 欢迎来到MotorShop！我是您的AI摩托车助手。我可以根据您的预算、位置和偏好帮您找到完美的摩托车。今天我能为您做些什么？"
+        "english": "Hello! 👋 Welcome to MotorShop! I'm your AI motorcycle assistant. I can help you find the perfect bike based on your budget, location, and preferences.\n\nTo get started, please reply with:\n1. Budget (RM) – e.g. RM 5,000 – RM 8,000\n2. Area / Location – e.g. Puchong, PJ, KL\n3. Preferred model / brand (optional) – e.g. Yamaha Ego S, Honda\n\nAnswer in one line, for example: RM 5,000, Puchong, Yamaha Ego S",
+        "malay": "Hello! 👋 Selamat datang ke MotorShop! Saya pembantu AI motosikal anda. Saya boleh membantu anda mencari motosikal yang sesuai berdasarkan bajet, lokasi, dan pilihan anda.\n\nUntuk bermula, sila balas dengan:\n1. Bajet (RM) – cth. RM 5,000 – RM 8,000\n2. Kawasan / Lokasi – cth. Puchong, PJ, KL\n3. Model / jenama pilihan (pilihan) – cth. Yamaha Ego S, Honda\n\nJawab dalam satu baris, contoh: RM 5,000, Puchong, Yamaha Ego S",
+        "chinese": "你好！👋 欢迎来到MotorShop！我是您的AI摩托车助手。我可以根据您的预算、位置和偏好帮您找到完美的摩托车。\n\n请按下面回复：\n1. 预算（RM）– 例如：RM 5,000 – RM 8,000\n2. 地区 / 位置 – 例如：Puchong、PJ、KL\n3. 偏好的车型 / 品牌（可选）– 例如：Yamaha Ego S、Honda\n\n请一行回复，例如：RM 5,000，Puchong，Yamaha Ego S"
       },
       "greeting_response": {
         "english": "Hi there! I'm here to help you find your dream motorcycle. What type of bike are you looking for?",
         "malay": "Hai! Saya di sini untuk membantu anda mencari motosikal impian anda. Apakah jenis motosikal yang anda cari?",
         "chinese": "你好！我在这里帮您找到您梦想的摩托车。您在寻找什么类型的摩托车？"
       },
+      "smart_question": {
+        "english": "{question}",
+        "malay": "{question}",
+        "chinese": "{question}"
+      },
       "bike_recommendation": {
-        "english": "Based on your requirements, here are my top recommendations:\n\n{bikes}\n\nWould you like more details on any of these?",
-        "malay": "Berdasarkan keperluan anda, berikut adalah cadangan teratas saya:\n\n{bikes}\n\nAdakah anda ingin maklumat lanjut mengenai mana-mana motosikal ini?",
-        "chinese": "根据您的需求，以下是我的最佳推荐：\n\n{bikes}\n\n您想了解其中任何一款的更多详情吗？"
+        "english": "Based on your requirements, here are my top recommendations:\n\n{recommendation_reasoning}\n\n{bikes}\n\nWould you like more details on any of these?",
+        "malay": "Berdasarkan keperluan anda, berikut adalah cadangan teratas saya:\n\n{recommendation_reasoning}\n\n{bikes}\n\nAdakah anda ingin maklumat lanjut mengenai mana-mana motosikal ini?",
+        "chinese": "根据您的需求，以下是我的最佳推荐：\n\n{recommendation_reasoning}\n\n{bikes}\n\n您想了解其中任何一款的更多详情吗？"
+      },
+      "no_model_alternatives": {
+        "english": "We currently don't have *{model}*. Here are some alternatives that might suit you:\n\n{bikes}\n\nWould you like more details on any of these?",
+        "malay": "Kami tidak ada *{model}* buat masa ini. Berikut adalah alternatif yang mungkin sesuai:\n\n{bikes}\n\nAdakah anda ingin maklumat lanjut mengenai mana-mana motosikal ini?",
+        "chinese": "我们目前没有 *{model}*。以下是一些可能适合您的替代选择：\n\n{bikes}\n\n您想了解其中任何一款的更多详情吗？"
       },
       "no_results": {
-        "english": "I couldn't find motorcycles matching your exact criteria. Let me help you:\n\n1. Try adjusting your budget or preferences\n2. Browse by category\n3. Talk to a human agent\n\nWhat would you like to do?",
-        "malay": "Saya tidak dapat mencari motosikal yang sepadan dengan kriteria anda. Biar saya membantu:\n\n1. Cuba laraskan bajet atau pilihan anda\n2. Layari mengikut kategori\n3. Bercakap dengan ejen manusia\n\nApa yang anda mahu lakukan?",
-        "chinese": "我找不到完全符合您标准的摩托车。让我帮您：\n\n1. 尝试调整您的预算或偏好\n2. 按类别浏览\n3. 与人工客服交谈\n\n您想做什么？"
+        "english": "Sorry, we don't sell this bike. We don't have it in our stock right now.\n\nYou can:\n1. Try a different budget or area\n2. Ask for other models we have\n3. Talk to our team for help\n\nWhat would you like to do?",
+        "malay": "Maaf, kami tidak menjual motosikal ini. Kami tidak memilikinya dalam stok sekarang.\n\nAnda boleh:\n1. Cuba bajet atau kawasan lain\n2. Minta model lain yang kami ada\n3. Bercakap dengan pasukan kami untuk bantuan\n\nApa yang anda mahu lakukan?",
+        "chinese": "抱歉，我们没有卖这款摩托车。目前没有货。\n\n您可以：\n1. 试试其他预算或地区\n2. 询问我们有的其他型号\n3. 联系我们的团队获取帮助\n\n您想怎么做？"
+      },
+      "more_details_prompt": {
+        "english": "Which bike would you like full details on? Reply with the number (e.g. 1 or 2) or the bike name, and I'll give you specs, price, and availability. You can also say \"got others?\" for more options.",
+        "malay": "Motosikal mana yang anda mahu maklumat penuh? Balas dengan nombor (cth. 1 atau 2) atau nama motosikal, dan saya akan berikan spec, harga dan ketersediaan. Anda juga boleh kata \"ada lain?\" untuk lebih banyak pilihan.",
+        "chinese": "您想了解哪一款的详细资料？请回复编号（如 1 或 2）或摩托车名称，我会提供规格、价格和库存。您也可以说「还有别的吗？」获取更多推荐。"
+      },
+      "model_detail_full": {
+        "english": "Here are the full details for *{name}*:\n\n{description}\n\n*Price:* {currency} {price}{locations}\n*Engine:* {engine}\n*Type:* {type}\n*Availability:* {inStock}\n\n{specs}\n\nWould you like to know about another model or arrange a test ride?",
+        "malay": "Berikut adalah maklumat penuh untuk *{name}*:\n\n{description}\n\n*Harga:* {currency} {price}{locations}\n*Enjin:* {engine}\n*Jenis:* {type}\n*Ketersediaan:* {inStock}\n\n{specs}\n\nAdakah anda ingin tahu tentang model lain atau mengatur ujian memandu?",
+        "chinese": "以下是 *{name}* 的完整资料：\n\n{description}\n\n*价格：* {currency} {price}{locations}\n*发动机：* {engine}\n*类型：* {type}\n*库存：* {inStock}\n\n{specs}\n\n您想了解其他型号或预约试驾吗？"
+      },
+      "model_not_found": {
+        "english": "I'm sorry, we don't have this model. Would you like to see other bikes we have?",
+        "malay": "Maaf, kami tidak ada model ini. Adakah anda ingin lihat motosikal lain yang kami ada?",
+        "chinese": "抱歉，我们没有这款型号。您想看看我们其他的摩托车吗？"
       },
       "clarification_questions": {
         "english": "To give you the best recommendations, please reply with these items (you can answer in one line):\n\n1) **Budget (RM)** – e.g. RM 5,000 – RM 8,000\n2) **Area / Location** – e.g. Puchong, PJ, KL\n3) **Preferred model / brand (optional)** – e.g. Yamaha Ego S, Honda\n\nExample reply:\nRM 5,000, Puchong, Yamaha Ego S",
         "malay": "Untuk saya cadangkan motosikal terbaik, sila balas dengan maklumat berikut (boleh jawab dalam satu baris sahaja):\n\n1) **Bajet (RM)** – cth: RM 5,000 – RM 8,000\n2) **Kawasan / Lokasi** – cth: Puchong, PJ, KL\n3) **Model / jenama pilihan (pilihan sahaja)** – cth: Yamaha Ego S, Honda\n\nContoh balasan:\nRM 5,000, Puchong, Yamaha Ego S",
         "chinese": "为了给您最合适的推荐，请按下面这样回复（可以一行写完）：\n\n1) **预算（RM）** – 例如：RM 5,000 – RM 8,000\n2) **地区 / 位置** – 例如：Puchong、PJ、KL\n3) **偏好的车型 / 品牌（可选）** – 例如：Yamaha Ego S、Honda\n\n示例回复：\nRM 5,000，Puchong，Yamaha Ego S"
+      },
+      "clarification_dynamic": {
+        "english": "{clarification_message}",
+        "malay": "{clarification_message}",
+        "chinese": "{clarification_message}"
+      },
+      "no_results_ai": {
+        "english": "{message}",
+        "malay": "{message}",
+        "chinese": "{message}"
       },
       "agent_transfer": {
         "english": "I'm connecting you with one of our expert motorcycle consultants who can better assist you. Please hold on...",
@@ -558,6 +728,16 @@
         "english": "We have a wide range of models from various brands. Are you looking for a specific brand or model? Or would you like me to recommend based on your needs?",
         "malay": "Kami mempunyai pelbagai model dari pelbagai jenama. Adakah anda mencari jenama atau model tertentu? Atau adakah anda mahu saya mencadangkan berdasarkan keperluan anda?",
         "chinese": "我们有来自各种品牌的各种型号。您在寻找特定品牌或型号吗？或者您想让我根据您的需求推荐？"
+      },
+      "test_ride_info": {
+        "english": "**Arrange a test ride** 🏍️\n\nOur team can help you pick a booking slot that suits you and confirm availability.\n\nA refundable deposit may be required to secure your test ride — our agent will explain the amount and payment method.\n\nWhen you're ready, just tell me \"I'm ready\" and I'll connect you with an agent to finalize the booking.",
+        "malay": "**Atur ujian memandu** 🏍️\n\nPasukan kami boleh bantu anda pilih slot tempahan yang sesuai dan sahkan ketersediaan.\n\nDeposit yang boleh dikembalikan mungkin diperlukan untuk mengesahkan ujian memandu anda — ejen kami akan terangkan jumlah dan cara bayaran.\n\nBila anda sudah bersedia, beritahu saya \"saya dah ready\" dan saya akan sambungkan anda dengan ejen untuk sahkan tempahan.",
+        "chinese": "**预约试驾** 🏍️\n\n我们的团队可以帮您选择合适的试驾时段并确认有没有位置。\n\n预约试驾可能需要支付可退还定金，专人会为您说明金额和付款方式。\n\n当您准备好时跟我说「我准备好了」，我会帮您转接人工为您确认预约。"
+      },
+      "test_ride_booking_confirm": {
+        "english": "Great, let's get you booked! 🏍️ I'm connecting you with our team now to confirm your test ride slot. A refundable deposit may be required — our agent will explain the amount and payment method.",
+        "malay": "Bagus, jom tempah! 🏍️ Saya sedang sambungkan anda dengan pasukan kami untuk sahkan slot ujian memandu anda. Deposit yang boleh dikembalikan mungkin diperlukan — ejen kami akan terangkan jumlah dan cara bayaran.",
+        "chinese": "好的，我们现在为您连接团队来确认试驾时段！🏍️ 可能需要支付可退还定金，专人会为您说明金额和付款方式。"
       }
     },
     "settings": {

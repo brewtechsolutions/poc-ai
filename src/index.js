@@ -30,25 +30,29 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
     const context = {
       user_message: message,
+      language: req.body.language || undefined,
       metadata: {
         phone_number: from,
         message_type: type || 'text',
         media_url: mediaUrl,
         timestamp: new Date().toISOString(),
+        language: req.body.language || req.body.metadata?.language,
       },
     };
 
     const result = await workflowEngine.execute(context);
-    const response = result.lastResult?.data?.finalResponse || 
+    const response = result.lastResult?.data?.finalResponse ||
                     result.lastResult?.data?.optimized ||
                     'I apologize, I couldn\'t process that request.';
 
     // TODO: Send response via WhatsApp
     // await whatsappClient.sendMessage(from, response);
+    // Persist result.language for this user/session and send as body.language on next request.
 
     res.json({
       success: true,
       response,
+      language: result.language || result.lastResult?.data?.language,
       tokensUsed: result.tokensUsed,
       responseTime: result.responseTime,
     });
@@ -61,25 +65,28 @@ app.post('/webhook/whatsapp', async (req, res) => {
 // Test endpoint
 app.post('/api/test', async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, language } = req.body;
 
     const context = {
       user_message: message,
+      language: language || undefined,
       metadata: {
         phone_number: 'test-user',
         message_type: 'text',
         timestamp: new Date().toISOString(),
+        language: language,
       },
     };
 
     const result = await workflowEngine.execute(context);
-    const response = result.lastResult?.data?.finalResponse || 
+    const response = result.lastResult?.data?.finalResponse ||
                     result.lastResult?.data?.optimized ||
                     'I apologize, I couldn\'t process that request.';
 
     res.json({
       success: true,
       response,
+      language: result.language || result.lastResult?.data?.language,
       debug: {
         intent: result.lastResult?.data?.intent,
         confidence: result.lastResult?.data?.confidence,
