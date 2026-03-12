@@ -49,11 +49,13 @@ router.post('/api/test-chat', async (req, res) => {
     };
     session.messages.push(userMessage);
 
-    // Execute workflow (pass persisted language so "choose language first" is skipped after selection)
+    // Execute workflow (pass persisted state so we don't re-greet or lose context)
     const workflowEngine = new WorkflowEngine();
     const context = {
       user_message: message,
       language: session.language,
+      languageLocked: session.languageLocked,
+      lastIntent: session.lastIntent,
       phone_number: session.phoneNumber,
       conversation_id: currentSessionId,
       entities: session.lastEntities,
@@ -74,9 +76,15 @@ router.post('/api/test-chat', async (req, res) => {
 
     const result = await workflowEngine.execute(context);
 
-    // Persist selected language for next messages (language-first flow)
+    // Persist state for next message so we never re-greet and keep language locked
     if (result.language) {
       session.language = result.language;
+    }
+    if (result.languageLocked !== undefined) {
+      session.languageLocked = result.languageLocked;
+    }
+    if (result.lastIntent !== undefined) {
+      session.lastIntent = result.lastIntent;
     }
     // Persist last search entities so "got others?" / more_options can reuse criteria
     const entitiesFromResult = result.allResults?.find(r => r.data?.entities && Object.keys(r.data.entities).length > 0)?.data?.entities;

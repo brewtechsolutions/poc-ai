@@ -274,7 +274,7 @@
             "popularity",
             "user_preference_match"
           ],
-          "top_n": 1,
+          "top_n": 5,
           "min_relevance_score": 0.65,
           "next": "bike_response_formatter"
         }
@@ -290,7 +290,7 @@
           "include_specs": true,
           "include_location": true,
           "include_availability": true,
-          "max_products": 1,
+          "max_products": 5,
           "format": "whatsapp",
           "language_aware": true,
           "next": "response_optimizer"
@@ -611,9 +611,9 @@
     ],
     "templates": {
       "language_choice": {
-        "english": "Please choose your language:\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\nReply with 1, 2, or 3.",
-        "malay": "Sila pilih bahasa:\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\nBalas dengan 1, 2, atau 3.",
-        "chinese": "请选择语言：\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\n请回复 1、2 或 3。"
+        "english": "Hey there! 👋\n\nJust let me know which language you’re more comfortable with, ya?\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\nYou can just reply with 1, 2, or 3.",
+        "malay": "Hai! 👋\n\nBeritahu saya bahasa mana yang anda lebih selesa guna ya?\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\nAnda boleh balas dengan 1, 2, atau 3 sahaja.",
+        "chinese": "嗨～👋\n\n跟我说你比较习惯用哪一种语言：\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\n直接回复 1、2 或 3 就可以了。"
       },
       "greeting": {
         "english": "Hello! 👋 Welcome to MotorShop! I'm your AI motorcycle assistant. I can help you find the perfect bike based on your budget, location, and preferences.\n\nTo get started, please reply with:\n1. Budget (RM) – e.g. RM 5,000 – RM 8,000\n2. Area / Location – e.g. Puchong, PJ, KL\n3. Preferred model / brand (optional) – e.g. Yamaha Ego S, Honda\n\nAnswer in one line, for example: RM 5,000, Puchong, Yamaha Ego S",

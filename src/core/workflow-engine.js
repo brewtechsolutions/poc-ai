@@ -5,6 +5,9 @@ import openai, { TOKEN_CONFIG } from '../config/openai.js';
 import ProductRecommender from '../utils/product-recommender.js';
 import ImageProcessor from '../utils/image-processor.js';
 import VoiceProcessor from '../utils/voice-processor.js';
+import SearchAgent from '../agents/search-agent.js';
+import LanguageAgent from '../agents/language-agent.js';
+import ResponseAgent from '../agents/response-agent.js';
 
 // Load workflow JSON without import assertions for broader Node compatibility
 const workflowPath = path.resolve(process.cwd(), 'workflow.json');
@@ -31,7 +34,7 @@ class WorkflowEngine {
       ...context,
       tokensUsed: 0,
       startTime: Date.now(),
-      conversationHistory: [],
+      conversationHistory: context.conversationHistory || [],
       workflowSteps: [],
       errors: [],
       allResults: [],
@@ -39,6 +42,8 @@ class WorkflowEngine {
       visitedNodes: new Set(),
       maxIterations: 100,
       iterationCount: 0,
+      lastIntent: context.lastIntent,
+      languageLocked: context.languageLocked,
     };
 
     const DEBUG = process.env.DEBUG === 'true';
@@ -183,10 +188,10 @@ class WorkflowEngine {
         return this.handleClassifier(node, context);
       
       case 'nlp':
-        return await this.handleNLP(node, context);
+        return await LanguageAgent.handleNLP(node, context, { nodes: this.nodes });
       
       case 'router':
-        return this.handleRouter(node, context);
+        return LanguageAgent.handleRouter(node, context);
       
       case 'database':
         return await this.handleDatabase(node, context);
@@ -195,19 +200,19 @@ class WorkflowEngine {
         return await this.handleML(node, context);
       
       case 'formatter':
-        return this.handleFormatter(node, context);
+        return ResponseAgent.handleFormatter(node, context, this.workflow);
       
       case 'optimizer':
-        return await this.handleOptimizer(node, context);
+        return await ResponseAgent.handleOptimizer(node, context);
       
       case 'handler':
-        return await this.handleHandler(node, context);
+        return ResponseAgent.handleHandler(node, context, this.workflow);
       
       case 'escalation':
         return await this.handleEscalation(node, context);
       
       case 'action':
-        return this.handleAction(node, context);
+        return ResponseAgent.handleAction(node, context, this.workflow);
       
       case 'vision':
         return await this.handleVision(node, context);
@@ -216,7 +221,7 @@ class WorkflowEngine {
         return await this.handleSpeech(node, context);
       
       case 'language_selector':
-        return this.handleLanguageSelector(node, context);
+        return LanguageAgent.handleLanguageSelector(node, context);
       
       case 'model_details':
         return await this.handleModelDetails(node, context);
@@ -260,7 +265,9 @@ class WorkflowEngine {
 
     // Not in list: try DB lookup by model name (e.g. "i want ego s" -> search for "ego s")
     if (!product) {
-      const modelName = (entities.model || '').toString().trim() || this.extractModelNameFromMessage(context.user_message || '');
+      const modelName =
+        (entities.model || '').toString().trim() ||
+        LanguageAgent.extractModelNameFromMessage(context.user_message || '');
       if (modelName.length >= 2) {
         const dbMatches = await prisma.product.findMany({
           where: {
@@ -350,74 +357,8 @@ class WorkflowEngine {
     };
   }
 
-  /**
-   * Extract model name from messages like "i want ego s", "looking for yamaha ego", "ego s".
-   */
-  extractModelNameFromMessage(text) {
-    const t = (text || '').trim();
-    if (!t) return '';
-    const lower = t.toLowerCase();
-    const patterns = [
-      /(?:i want|i'm looking for|looking for|do you have|got any|have you got|show me)\s+(.+)/i,
-      /(?:can i (?:see|get)|would like)\s+(.+)/i,
-    ];
-    for (const re of patterns) {
-      const m = t.match(re);
-      if (m && m[1]) return m[1].trim().replace(/\?|\.$/, '').slice(0, 80);
-    }
-    return t.length <= 80 ? t : t.slice(0, 80);
-  }
-
-  /**
-   * Language selector: enforce "choose language first". If context.language is set, continue;
-   * if user message is 1/2/3 or language name, set language and go to greeting; else prompt to choose.
-   */
-  handleLanguageSelector(node, context) {
-    const config = node.config || {};
-    const nextIfSet = config.next_if_set || 'message_classifier';
-    const nextAfterSelect = config.next_after_select || 'greeting_handler';
-    const nextPrompt = config.next_prompt || 'language_selection_prompt';
-
-    const existingLanguage = context.language || context.metadata?.language;
-    if (existingLanguage) {
-      const normalized = String(existingLanguage).toLowerCase();
-      if (['english', 'malay', 'chinese', 'en', 'bm', 'zh'].includes(normalized)) {
-        context.language = normalized === 'en' ? 'english' : normalized === 'bm' ? 'malay' : normalized === 'zh' ? 'chinese' : normalized;
-        if (process.env.DEBUG === 'true') {
-          console.log(`   [LanguageSelector] Language already set: ${context.language}`);
-        }
-        return { data: { language: context.language }, tokensUsed: 0, next: nextIfSet };
-      }
-    }
-
-    const raw = (context.user_message || '').trim();
-    const msg = raw.toLowerCase();
-    let selected = null;
-    if (/^1$|^english$|^en$/i.test(msg)) selected = 'english';
-    else if (/^2$|^malay$|^bm$|^bahasa$/i.test(msg)) selected = 'malay';
-    else if (/^3$|^chinese$|^zh$|^中文$/i.test(msg) || msg.includes('chinese') || msg.includes('中文')) selected = 'chinese';
-
-    if (selected) {
-      context.language = selected;
-      if (process.env.DEBUG === 'true') {
-        console.log(`   [LanguageSelector] User selected language: ${selected}`);
-      }
-      return {
-        data: { language: selected },
-        tokensUsed: 0,
-        next: nextAfterSelect,
-      };
-    }
-
-    if (process.env.DEBUG === 'true') {
-      console.log(`   [LanguageSelector] No language set, prompting user to choose`);
-    }
-    return {
-      data: { needLanguageChoice: true },
-      tokensUsed: 0,
-      next: nextPrompt,
-    };
-  }
+  // extractModelNameFromMessage and language selection / NLP / routing logic
+  // have been moved into LanguageAgent to keep this class focused on orchestration.
 
   /**
    * Get next node based on current result
@@ -525,351 +466,6 @@ class WorkflowEngine {
     };
   }
 
-  /**
-   * Detect "budget, area, model" reply (e.g. "RM 5,000, Puchong, Yamaha Ego") and parse without calling API.
-   * Returns null if message doesn't match this format.
-   * Handles comma inside budget (e.g. 5,000) by extracting budget first, then splitting the rest for area/model.
-   */
-  parseStructuredBudgetAreaModel(message, context = {}) {
-    const raw = String(message).trim();
-    if (!raw) return null;
-    const hasRm = /\bRM\s*\d/i.test(raw) || /^\s*\d[\d,\s]*\d/.test(raw) || /^\s*\d+/.test(raw);
-    if (!hasRm) return null;
-
-    // Extract budget first so "5,000" isn't split into parts (RM 5,000 -> budget 5000)
-    const budgetMatch = raw.match(/RM\s*([\d,]+)/i) || raw.match(/^([\d,]+)/);
-    if (!budgetMatch) return null;
-    const budget = budgetMatch[1].replace(/,/g, '');
-    const afterBudget = raw.slice(raw.indexOf(budgetMatch[0]) + budgetMatch[0].length).replace(/^[\s,]+/, '').trim();
-    if (!afterBudget) return null;
-
-    // Rest is "Puchong, Yamaha Ego" or "Puchong" only
-    const restParts = afterBudget.split(/\s*,\s*/).map(p => p.trim()).filter(Boolean);
-    const area = restParts[0] || null;
-    const model = restParts.length >= 2 ? restParts.slice(1).join(', ') : null;
-
-    return {
-      intent: 'bike_recommendation',
-      entities: {
-        budget: budget || undefined,
-        area: area || undefined,
-        location: area || undefined,
-        model: model || undefined,
-        brand: model || undefined,
-      },
-      language: context.language || 'english',
-      confidence: 0.95,
-    };
-  }
-
-  async handleNLP(node, context) {
-    const message = context.user_message || context.lastResult?.data?.message;
-    
-    if (!message) {
-      console.error('[NLP] No message found in context');
-      return {
-        data: {
-          intent: 'general_question',
-          entities: {},
-          confidence: 0.3,
-          requires_product_search: false,
-          requires_agent_escalation: false,
-        },
-        tokensUsed: 0,
-        confidence: 0.3,
-        error: 'No message to process',
-      };
-    }
-
-    // Rule-based: "got others?" / more options -> show more suggestions (reuse last search)
-    const lower = message.toLowerCase().trim();
-    if (/got others?|any others?|more options?|show more|other (bikes?|options?|suggestions?)|ada lain|还有别的|其他(的)?(选择|推荐)?/i.test(lower) && lower.length < 80) {
-      if (process.env.DEBUG === 'true') console.log(`   [NLP] More options detected: more_options`);
-      return {
-        data: {
-          intent: 'more_options',
-          entities: context.entities || context.metadata?.entities || {},
-          language: context.language || 'english',
-          confidence: 0.9,
-          requires_product_search: true,
-          requires_agent_escalation: false,
-        },
-        tokensUsed: 0,
-        confidence: 0.9,
-      };
-    }
-
-    // Rule-based: "got Honda?" / "got Yamaha" etc. -> treat as brand/model request
-    const gotBrandMatch = lower.match(/^got\s+([a-z0-9][a-z0-9\s\-]+)/i);
-    if (gotBrandMatch && gotBrandMatch[1]) {
-      const brandOrModel = gotBrandMatch[1].replace(/[?.!]+$/g, '').trim();
-      if (brandOrModel.length >= 2 && brandOrModel.length <= 40) {
-        if (process.env.DEBUG === 'true') {
-          console.log(`   [NLP] Brand/model request detected via "got X": ${brandOrModel}`);
-        }
-        return {
-          data: {
-            intent: 'bike_recommendation',
-            entities: { brand: brandOrModel, model: brandOrModel },
-            language: context.language || 'english',
-            confidence: 0.9,
-            requires_product_search: true,
-            requires_agent_escalation: false,
-          },
-          tokensUsed: 0,
-          confidence: 0.9,
-        };
-      }
-    }
-
-    // Rule-based: keyword "arrange" or test ride phrases -> test_ride_request (show instructions + deposit), NOT agent transfer
-    const arrangeOrTestRide = /\barrange\b/i.test(lower) || /arrange (a )?test ride|book (a )?test ride|test ride|ujian memandu|预约试驾|试驾/i.test(lower);
-    if (arrangeOrTestRide && lower.length < 80) {
-      if (process.env.DEBUG === 'true') console.log(`   [NLP] Arrange / test ride keyword -> test_ride_request (show instructions + deposit)`);
-      return {
-        data: {
-          intent: 'test_ride_request',
-          entities: {},
-          language: context.language || 'english',
-          confidence: 0.95,
-          requires_product_search: false,
-          requires_agent_escalation: false,
-        },
-        tokensUsed: 0,
-        confidence: 0.95,
-      };
-    }
-
-    // Rule-based: content words -> agent_request (transfer to real agent, one response, end session)
-    const agentNode = this.nodes.get('agent_escalation');
-    const contentWords = (agentNode?.config?.content_words || []).map(w => String(w).trim().toLowerCase()).filter(Boolean);
-    if (contentWords.length > 0 && lower.length <= 80) {
-      const matchesContentWord = contentWords.some(cw => lower === cw || lower.includes(cw));
-      if (matchesContentWord) {
-        if (process.env.DEBUG === 'true') console.log(`   [NLP] Content word matched -> agent_request (transfer to agent)`);
-        return {
-          data: {
-            intent: 'agent_request',
-            entities: {},
-            language: context.language || 'english',
-            confidence: 0.95,
-            requires_product_search: false,
-            requires_agent_escalation: true,
-          },
-          tokensUsed: 0,
-          confidence: 0.95,
-        };
-      }
-    }
-
-    // Rule-based: "i want [model]" / "looking for [model]" etc. -> model_selection so we can look up in DB
-    const extractedModel = this.extractModelNameFromMessage(message);
-    const stopPhrases = /^(to |the |more |details?|price|info|about|how much|what is|test ride)/i;
-    if (extractedModel.length >= 2 && extractedModel.length <= 60 && !/^\d+$/.test(extractedModel) && !stopPhrases.test(extractedModel)) {
-      const looksLikeModelRequest = /^(i want|i'm looking for|looking for|do you have|got any|have you got|show me|can i see|would like)\s+/i.test(lower) || (/^(ego s|yamaha|honda|modenas|suzuki|kawasaki|ninja|rxz|lc135|ego|nmax|aerox)/i.test(lower) && lower.split(/\s+/).length <= 4);
-      if (looksLikeModelRequest) {
-        if (process.env.DEBUG === 'true') console.log(`   [NLP] Model lookup by name: "${extractedModel}"`);
-        return {
-          data: {
-            intent: 'model_selection',
-            entities: { model: extractedModel },
-            language: context.language || 'english',
-            confidence: 0.85,
-            requires_product_search: false,
-            requires_agent_escalation: false,
-          },
-          tokensUsed: 0,
-          confidence: 0.85,
-        };
-      }
-    }
-    // Rule-based: user selected a model by number (1, 2, 3) or by name -> model_selection
-    const lastShown = context.lastShownProducts || context.metadata?.lastShownProducts;
-    if (lastShown && Array.isArray(lastShown) && lastShown.length > 0) {
-      const trimmed = message.trim();
-      const num = parseInt(trimmed, 10);
-      if (Number.isInteger(num) && num >= 1 && num <= lastShown.length) {
-        if (process.env.DEBUG === 'true') console.log(`   [NLP] Model selection by number: ${num}`);
-        return {
-          data: {
-            intent: 'model_selection',
-            entities: { selected_index: num },
-            language: context.language || 'english',
-            confidence: 0.95,
-            requires_product_search: false,
-            requires_agent_escalation: false,
-          },
-          tokensUsed: 0,
-          confidence: 0.95,
-        };
-      }
-      const matchByName = lastShown.find(p =>
-        (p.name && (p.name).toLowerCase().includes(lower)) ||
-        (p.brand && (p.brand).toLowerCase().includes(lower)) ||
-        (p.features?.model && String(p.features.model).toLowerCase().includes(lower))
-      );
-      if (matchByName && lower.length < 80) {
-        if (process.env.DEBUG === 'true') console.log(`   [NLP] Model selection by name`);
-        return {
-          data: {
-            intent: 'model_selection',
-            entities: {},
-            language: context.language || 'english',
-            confidence: 0.9,
-            requires_product_search: false,
-            requires_agent_escalation: false,
-          },
-          tokensUsed: 0,
-          confidence: 0.9,
-        };
-      }
-    }
-
-    // Rule-based: "more detail" -> prompt which bike they want details on
-    if (/more detail|tell me more|full specs?|full details?|详细|maklumat lanjut/i.test(lower) && lower.length < 60) {
-      if (process.env.DEBUG === 'true') console.log(`   [NLP] More details detected: more_details`);
-      return {
-        data: {
-          intent: 'more_details',
-          entities: {},
-          language: context.language || 'english',
-          confidence: 0.9,
-          requires_product_search: false,
-          requires_agent_escalation: false,
-        },
-        tokensUsed: 0,
-        confidence: 0.9,
-      };
-    }
-
-    // Rule-based: recognize "RM X, Location, Model" so user's reply is accepted and goes to bike search
-    const structured = this.parseStructuredBudgetAreaModel(message, context);
-    if (structured) {
-      if (process.env.DEBUG === 'true') {
-        console.log(`   [NLP] Structured reply detected: bike_recommendation, budget=${structured.entities.budget}, area=${structured.entities.area}, model=${structured.entities.model}`);
-      }
-      return {
-        data: {
-          intent: structured.intent,
-          entities: structured.entities,
-          language: structured.language,
-          confidence: structured.confidence,
-          requires_product_search: true,
-          requires_agent_escalation: false,
-        },
-        tokensUsed: 0,
-        confidence: structured.confidence,
-      };
-    }
-
-    // Rule-based: budget-only messages like "I only have the budget of RM5,000"
-    const budgetOnlyMatch = message.match(/\b(?:budget|bajet)[^0-9]{0,15}RM\s*([\d,]+)/i) ||
-                            message.match(/\bRM\s*([\d,]+)[^a-zA-Z0-9]{0,10}(?:budget|bajet)\b/i);
-    if (budgetOnlyMatch) {
-      const budgetStr = (budgetOnlyMatch[1] || '').replace(/,/g, '');
-      if (budgetStr) {
-        if (process.env.DEBUG === 'true') {
-          console.log(`   [NLP] Budget-only message detected, budget=${budgetStr}`);
-        }
-        return {
-          data: {
-            intent: 'bike_recommendation',
-            entities: {
-              budget: budgetStr,
-            },
-            language: context.language || 'english',
-            confidence: 0.9,
-            requires_product_search: true,
-            requires_agent_escalation: false,
-          },
-          tokensUsed: 0,
-          confidence: 0.9,
-        };
-      }
-    }
-    
-    const systemPrompt = node.config.system_prompt || 
-      "You are a sales assistant. Extract intent, language and entities from user messages.";
-    
-    const userPrompt = `Extract intent, language and entities from this message: "${message}"\n\nReturn JSON with: language (english/malay/chinese), intent, entities (object), confidence (0-1), requires_product_search (boolean), requires_agent_escalation (boolean)`;
-
-    try {
-      if (process.env.DEBUG === 'true') {
-        console.log(`   [NLP] Processing message: "${message.substring(0, 50)}..."`);
-      }
-
-      const completion = await openai.chat.completions.create({
-        model: node.config.model || 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        temperature: node.config.temperature || TOKEN_CONFIG.TEMPERATURE.STRICT,
-        max_tokens: node.config.max_tokens || 150,
-        response_format: { type: 'json_object' },
-      });
-
-      const content = JSON.parse(completion.choices[0].message.content);
-      const tokensUsed = completion.usage.total_tokens;
-
-      const detectedLanguage = context.language || content.language || 'english';
-
-      if (process.env.DEBUG === 'true') {
-        console.log(`   [NLP] Language: ${detectedLanguage}, Intent: ${content.intent}, Confidence: ${content.confidence || 0.5}`);
-      }
-
-      return {
-        data: {
-          intent: content.intent,
-          entities: content.entities || {},
-          // Never override existing conversation language with a new guess
-          language: detectedLanguage,
-          confidence: content.confidence || 0.5,
-          requires_product_search: content.requires_product_search || false,
-          requires_agent_escalation: content.requires_agent_escalation || false,
-        },
-        tokensUsed,
-        confidence: content.confidence || 0.5,
-      };
-    } catch (error) {
-      console.error('❌ NLP processing error:', error);
-      console.error('   Error details:', error.message);
-      if (error.response) {
-        console.error('   API response:', error.response.data);
-      }
-      
-      return {
-        data: {
-          intent: 'general_question',
-          entities: {},
-          language: 'english',
-          confidence: 0.3,
-          requires_product_search: false,
-          requires_agent_escalation: false,
-        },
-        tokensUsed: 0,
-        confidence: 0.3,
-        error: error.message,
-      };
-    }
-  }
-
-  handleRouter(node, context) {
-    const intent = context.lastResult?.data?.intent;
-    const route = node.config.routes.find(r => r.intent === intent);
-    // Pass through entities from classifier/NLP so model_details_handler gets selected_index
-    const entities = context.lastResult?.data?.entities;
-    
-    if (process.env.DEBUG === 'true') {
-      console.log(`   [Router] Intent: ${intent}, Route found: ${!!route}, Next: ${route?.next || node.config.fallback}`);
-    }
-    
-    return {
-      data: { intent, route, entities: entities || {} },
-      tokensUsed: 0,
-      next: route?.next || node.config.fallback,
-    };
-  }
 
   async handleDatabase(node, context) {
     const operation = node.config.operation;
@@ -878,7 +474,7 @@ class WorkflowEngine {
     try {
       switch (operation) {
         case 'semantic_search':
-          return await this.semanticProductSearch(node, context, lastResult);
+          return await SearchAgent.semanticProductSearch(node, context, lastResult);
         
         case 'get_price':
           return await this.getProductPrice(node, context, lastResult);
@@ -899,241 +495,6 @@ class WorkflowEngine {
       console.error('Database operation error:', error);
       return { data: {}, tokensUsed: 0, found: false, error: error.message };
     }
-  }
-
-  async semanticProductSearch(node, context, lastResult) {
-    const query = context.user_message || '';
-    // Use last search criteria when user says "got others?" / more_options (entities from session)
-    const entities = lastResult?.entities || context.entities || context.metadata?.entities || {};
-    const category = node.config.category || entities.category || null;
-    const isMoreOptions = context.lastIntent === 'more_options';
-
-    // MODEL-FIRST: when user specified a model/brand, search by model first, then apply budget and location
-    const modelSearchText = (entities.model || entities.brand || '').toString().trim();
-    const hasRequestedModel = !isMoreOptions && modelSearchText.length > 0;
-    const primarySearchText = modelSearchText || query;
-    const searchTerms = primarySearchText.toLowerCase().split(/\s+/).filter(t => t.length > 2);
-    const budgetNum = entities.budget ? parseFloat(entities.budget) : null;
-
-    const limit = isMoreOptions
-      ? (node.config.more_options_limit || 10)
-      : (node.config.limit || 15);
-
-    let finalProducts = [];
-
-    if (hasRequestedModel) {
-      // 1) Model first: query only by model/brand/name (no budget, no area in DB query)
-      const modelOnlyConditions = {
-        AND: [
-          { active: true },
-          { inStock: true },
-          {
-            OR: [
-              { name: { contains: primarySearchText, mode: 'insensitive' } },
-              { brand: { contains: primarySearchText, mode: 'insensitive' } },
-              { subcategory: { contains: entities.type || primarySearchText, mode: 'insensitive' } },
-              { description: { contains: query, mode: 'insensitive' } },
-              { category: { contains: category || query, mode: 'insensitive' } },
-              { tags: { hasSome: searchTerms } },
-            ],
-          },
-        ],
-      };
-
-      const modelMatches = await prisma.product.findMany({
-        where: modelOnlyConditions,
-        take: limit,
-        orderBy: { popularity: 'desc' },
-      });
-
-      // 2) Then filter by budget (in memory)
-      let afterBudget = modelMatches;
-      if (budgetNum != null) {
-        afterBudget = modelMatches.filter(p => p.price <= budgetNum);
-      }
-
-      // 3) Then filter by area/location (in memory)
-      let afterArea = afterBudget;
-      if (entities.area) {
-        afterArea = afterBudget.filter(p => {
-          const locations = p.features?.locations || [];
-          return locations.length === 0 || locations.some(loc =>
-            loc.toLowerCase().includes(entities.area.toLowerCase())
-          );
-        });
-        if (afterArea.length === 0) afterArea = afterBudget;
-      }
-
-      // Model is priority: always return model matches so the requested bike is shown first.
-      // If some model matches fit budget+area, use those first; then add the rest of the model matches.
-      if (modelMatches.length > 0) {
-        const modelIds = new Set(modelMatches.map(p => p.id));
-        const inBudgetAndArea = afterArea.filter(p => modelIds.has(p.id));
-        // Requested model first (those in budget+area, then the rest of model matches)
-        finalProducts = [...inBudgetAndArea, ...modelMatches.filter(p => !inBudgetAndArea.find(m => m.id === p.id))];
-
-        // If the requested model is a bit pricey (over budget), add exactly ONE alternative that fits budget+location
-        const modelIsPricey = budgetNum != null && inBudgetAndArea.length === 0;
-        if (modelIsPricey) {
-          const altConditions = {
-            AND: [
-              { active: true },
-              { inStock: true },
-              { price: { lte: budgetNum } },
-              { id: { notIn: [...modelIds] } },
-            ],
-          };
-          const alternatives = await prisma.product.findMany({
-            where: altConditions,
-            take: 10,
-            orderBy: { popularity: 'desc' },
-          });
-          let altFiltered = alternatives;
-          if (entities.area) {
-            altFiltered = alternatives.filter(p => {
-              const locations = p.features?.locations || [];
-              return locations.length === 0 || locations.some(loc =>
-                loc.toLowerCase().includes(entities.area.toLowerCase())
-              );
-            });
-            if (altFiltered.length === 0) altFiltered = alternatives;
-          }
-          finalProducts = [...finalProducts, ...altFiltered.slice(0, 1)];
-        } else {
-          // Model in budget: still add exactly one alternative by budget+location
-          const altConditions = {
-            AND: [
-              { active: true },
-              { inStock: true },
-              { id: { notIn: [...modelIds] } },
-            ],
-          };
-          if (budgetNum != null) altConditions.AND.push({ price: { lte: budgetNum } });
-          const alternatives = await prisma.product.findMany({
-            where: altConditions,
-            take: 10,
-            orderBy: { popularity: 'desc' },
-          });
-          let altFiltered = alternatives;
-          if (entities.area) {
-            altFiltered = alternatives.filter(p => {
-              const locations = p.features?.locations || [];
-              return locations.length === 0 || locations.some(loc =>
-                loc.toLowerCase().includes(entities.area.toLowerCase())
-              );
-            });
-            if (altFiltered.length === 0) altFiltered = alternatives;
-          }
-          finalProducts = [...finalProducts, ...altFiltered.slice(0, 1)];
-        }
-        finalProducts = finalProducts.slice(0, 4);
-      } else {
-        // No exact match: search whole DB for "nearly same" (same brand or any word in model name)
-        const modelWords = primarySearchText.split(/\s+/).filter(w => w.length >= 2).map(w => w.trim());
-        if (modelWords.length > 0) {
-          const orConditions = [];
-          for (const word of modelWords) {
-            orConditions.push({ name: { contains: word, mode: 'insensitive' } });
-            orConditions.push({ brand: { contains: word, mode: 'insensitive' } });
-            orConditions.push({ description: { contains: word, mode: 'insensitive' } });
-          }
-          const nearMatchConditions = {
-            AND: [
-              { active: true },
-              { inStock: true },
-              { OR: orConditions },
-            ],
-          };
-          const nearMatches = await prisma.product.findMany({
-            where: nearMatchConditions,
-            take: limit,
-            orderBy: { popularity: 'desc' },
-          });
-          let nearFiltered = nearMatches;
-          if (budgetNum != null) {
-            nearFiltered = nearMatches.filter(p => p.price <= budgetNum);
-            if (nearFiltered.length === 0) nearFiltered = nearMatches;
-          }
-          if (entities.area) {
-            const byArea = nearFiltered.filter(p => {
-              const locations = p.features?.locations || [];
-              return locations.length === 0 || locations.some(loc =>
-                loc.toLowerCase().includes(entities.area.toLowerCase())
-              );
-            });
-            if (byArea.length > 0) nearFiltered = byArea;
-          }
-          finalProducts = nearFiltered.slice(0, 4);
-        }
-      }
-    }
-
-    if (!hasRequestedModel || finalProducts.length === 0) {
-      // No requested model, or no model matches: use original logic (budget + area in query)
-      const baseConditions = {
-        AND: [
-          { active: true },
-          { inStock: true },
-        ],
-      };
-
-      if (!isMoreOptions) {
-        baseConditions.AND.push({
-          OR: [
-            { name: { contains: primarySearchText, mode: 'insensitive' } },
-            { brand: { contains: primarySearchText, mode: 'insensitive' } },
-            { subcategory: { contains: entities.type || primarySearchText, mode: 'insensitive' } },
-            { description: { contains: query, mode: 'insensitive' } },
-            { category: { contains: category || query, mode: 'insensitive' } },
-            { tags: { hasSome: searchTerms } },
-          ],
-        });
-      }
-
-      if (!isMoreOptions && budgetNum != null) {
-        baseConditions.AND.push({ price: { lte: budgetNum } });
-      }
-
-      const products = await prisma.product.findMany({
-        where: baseConditions,
-        take: limit,
-        orderBy: { popularity: 'desc' },
-      });
-
-      let filteredProducts = products;
-      if (entities.area) {
-        filteredProducts = products.filter(p => {
-          const locations = p.features?.locations || [];
-          return locations.length === 0 || locations.some(loc =>
-            loc.toLowerCase().includes(entities.area.toLowerCase())
-          );
-        });
-        if (filteredProducts.length === 0) filteredProducts = products;
-      }
-
-      if (hasRequestedModel && finalProducts.length === 0) {
-        finalProducts = filteredProducts.slice(0, 1);
-      } else if (!hasRequestedModel) {
-        finalProducts = filteredProducts;
-      }
-    }
-
-    const useFallbackWhenEmpty = node.config.use_fallback_when_empty === true;
-    if ((!finalProducts || finalProducts.length === 0) && useFallbackWhenEmpty) {
-      const fallbackLimit = node.config.fallback_limit || 5;
-      const fallbackProducts = await prisma.product.findMany({
-        where: { active: true, inStock: true },
-        orderBy: { popularity: 'desc' },
-        take: fallbackLimit,
-      });
-      finalProducts = fallbackProducts;
-    }
-
-    return {
-      data: { products: finalProducts || [] },
-      tokensUsed: 0,
-      found: (finalProducts && finalProducts.length) > 0,
-    };
   }
 
   async getProductPrice(node, context, lastResult) {
@@ -1218,25 +579,21 @@ class WorkflowEngine {
     };
   }
 
-  /**
-   * Get entities from the most recent node that produced them (e.g. language_detector).
-   * context_collector runs after intent_router, which does not pass entities; they live in an earlier result.
-   */
-  getEntitiesFromContext(context) {
-    const results = context.allResults || [];
-    for (let i = results.length - 1; i >= 0; i--) {
-      const entities = results[i]?.data?.entities;
-      if (entities && typeof entities === 'object' && Object.keys(entities).length > 0) {
-        return entities;
-      }
-    }
-    return context.lastResult?.data?.entities || {};
-  }
-
   async handleML(node, context) {
     const lastResult = context.lastResult?.data;
     const products = lastResult?.products || [];
     const userQuery = context.user_message;
+
+    // Delegate search-related ML nodes to SearchAgent
+    if (
+      node.id === 'context_collector' ||
+      node.id === 'product_recommender' ||
+      node.id === 'bike_ranker' ||
+      node.id === 'product_ranker' ||
+      node.id === 'no_results_handler'
+    ) {
+      return await SearchAgent.handleML(node, context, this.workflow);
+    }
 
     // Context collector: if user already gave budget + area, go to bike_search (routing via config.next_complete in getNextNode)
     if (node.id === 'context_collector') {
@@ -1519,220 +876,6 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
     };
   }
 
-  /** Check if any product matches the requested model/brand (e.g. "Yamaha Ego S"). */
-  productMatchesRequestedModel(product, requestedModel) {
-    if (!requestedModel || typeof requestedModel !== 'string') return true;
-    const n = (s) => (s || '').toLowerCase().trim();
-    const key = n(requestedModel);
-    const name = n(product.name);
-    const brand = n(product.brand || '');
-    const model = n(product.features?.model || '');
-    return name.includes(key) || (brand + ' ' + model).trim().includes(key) || model.includes(key);
-  }
-
-  handleFormatter(node, context) {
-    const products = context.lastResult?.data?.products || [];
-    const templateKey = node.config.template;
-    const lastIntent = context.lastIntent || context.lastResult?.data?.intent;
-    const language = context.language || context.lastResult?.data?.language || 'english';
-    const entities = this.getEntitiesFromContext(context);
-    const modelPart = (entities.model || '').trim();
-    const brandPart = (entities.brand || '').trim();
-    const requestedModel = !modelPart && !brandPart ? null
-      : !modelPart ? brandPart
-      : !brandPart ? modelPart
-      : brandPart.toLowerCase() === modelPart.toLowerCase() ? modelPart
-      : `${brandPart} ${modelPart}`.trim();
-
-    // When showing bike recommendations: use "we don't have this model but have alternatives" if requested model not in list.
-    // BUT for "more_options" (user said "got others?"), we should not repeat "we don't have this model" – just show more bikes.
-    let effectiveTemplateKey = templateKey;
-    if (
-      templateKey === 'bike_recommendation' &&
-      requestedModel &&
-      products.length > 0 &&
-      lastIntent !== 'more_options'
-    ) {
-      const hasRequestedModel = products.some(p => this.productMatchesRequestedModel(p, requestedModel));
-      if (!hasRequestedModel && this.workflow.templates.no_model_alternatives) {
-        effectiveTemplateKey = 'no_model_alternatives';
-      }
-    }
-
-    // Get template - support multi-language
-    let template = '';
-    if (typeof this.workflow.templates[effectiveTemplateKey] === 'object') {
-      template = this.workflow.templates[effectiveTemplateKey][language] ||
-                 this.workflow.templates[effectiveTemplateKey]['english'] ||
-                 '';
-    } else {
-      template = this.workflow.templates[effectiveTemplateKey] || '';
-    }
-
-    let formatted = template;
-    if (effectiveTemplateKey === 'no_model_alternatives' && requestedModel) {
-      formatted = formatted.replace(/\{model\}/g, requestedModel);
-    }
-
-    // Recommendation reasoning (AI-generated when user asked for a specific model: "model match a bit pricey, below one fits budget")
-    const recommendationReasoning = context.lastResult?.data?.recommendation_reasoning;
-    formatted = formatted.replace(/\{recommendation_reasoning\}\n?\n?/g, recommendationReasoning ? recommendationReasoning + '\n\n' : '\n');
-
-    // Format products generically (avoid repeating model in title if already in product.name)
-    if (products.length > 0) {
-      const alternativeReasoning = context.lastResult?.data?.alternative_reasoning;
-      const productsText = products.map((product, i) => {
-        const features = product.features || {};
-        const model = features.model || '';
-        const nameOnly = (product.name || '').trim();
-        const modelInName = model && nameOnly.toLowerCase().includes(model.toLowerCase());
-        const title = model && !modelInName ? `${nameOnly} ${model}` : nameOnly;
-        const engineSize = features.engineSize ? `${features.engineSize}cc` : '';
-        const type = features.type || product.subcategory || '';
-        const locations = features.locations ? ` (${features.locations.join(', ')})` : '';
-        const block = `${i + 1}. *${title}*\n   ${product.description || 'No description'}\n   Price: ${product.currency || 'MYR'} ${product.price?.toLocaleString() || product.price}${locations}\n   ${engineSize ? `Engine: ${engineSize}\n   ` : ''}${type ? `Type: ${type}\n   ` : ''}${product.inStock ? '✅ In Stock' : '❌ Out of Stock'}`;
-        if (i === 1 && alternativeReasoning) {
-          return `💡 ${alternativeReasoning}\n\n${block}`;
-        }
-        return block;
-      }).join('\n\n');
-      
-      formatted = formatted.replace('{bikes}', productsText);
-      formatted = formatted.replace('{products}', productsText);
-    }
-
-    // Replace other placeholders
-    if (node.config.include_context && context.lastResult?.data?.questions) {
-      const questions = Array.isArray(context.lastResult.data.questions) 
-        ? context.lastResult.data.questions.join('\n')
-        : context.lastResult.data.questions;
-      formatted = formatted.replace('{questions}', questions);
-    }
-
-    // Replace placeholders from lastResult.data (e.g. clarification_message, message from ML nodes)
-    if (node.config.include_context && context.lastResult?.data && typeof context.lastResult.data === 'object') {
-      const data = context.lastResult.data;
-      for (const [key, value] of Object.entries(data)) {
-        if (value != null && key !== 'products' && key !== 'formatted' && key !== 'response') {
-          const str = typeof value === 'string' ? value : (Array.isArray(value) ? value.join('\n') : String(value));
-          formatted = formatted.replace(new RegExp('\\{' + key + '\\}', 'g'), str);
-        }
-      }
-    }
-
-    // When no products, placeholder might be empty; still pass formatted so downstream can use it
-    if (products.length === 0 && (formatted.includes('{bikes}') || formatted.includes('{products}'))) {
-      formatted = formatted.replace(/\{bikes\}\s*/g, '').replace(/\{products\}\s*/g, '').trim();
-    }
-    return {
-      data: { formatted, products, response: formatted },
-      tokensUsed: 0,
-    };
-  }
-
-  async handleOptimizer(node, context) {
-    // Take whatever the previous node formatted as the bot reply
-    let response = context.lastResult?.data?.formatted ||
-                   context.lastResult?.data?.response ||
-                   context.lastResult?.data?.finalResponse ||
-                   '';
-    response = (response || '').toString().trim();
-
-    const lastIntent = context.lastIntent || context.lastResult?.data?.intent;
-    const isGreetingFlow = lastIntent === 'greeting' || context.lastResult?.data?.intent === 'greeting';
-    const isLanguageSelectionFlow = context.lastResult?.data?.needLanguageChoice === true;
-
-    // For pure template messages (greeting and language selection), skip OpenAI to avoid token usage
-    if (!response || isGreetingFlow || isLanguageSelectionFlow) {
-      // Simple whitespace cleanup only, no tokens
-      const cleaned = response.replace(/\n{3,}/g, '\n\n').trim();
-      return {
-        data: { optimized: cleaned, finalResponse: cleaned },
-        tokensUsed: 0,
-      };
-    }
-
-    const systemPrompt = node.config.system_prompt ||
-      'You are a friendly sales assistant. Rewrite the reply to sound natural, clear and concise.';
-
-    try {
-      const completion = await openai.chat.completions.create({
-        model: node.config.model || 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: response },
-        ],
-        temperature: node.config.temperature ?? TOKEN_CONFIG.TEMPERATURE.STRICT,
-        max_tokens: node.config.max_tokens || 600,
-      });
-
-      const optimized = (completion.choices[0].message.content || '').trim();
-      const tokensUsed = completion.usage?.total_tokens || 0;
-
-      // Fallback to original if something went wrong with content
-      const finalText = optimized || response;
-
-      return {
-        data: { optimized: finalText, finalResponse: finalText },
-        tokensUsed,
-      };
-    } catch (error) {
-      console.error('[Optimizer] Error optimizing response:', error.message);
-      // Fallback to old simple trimming behavior
-      let fallback = response.replace(/\n{3,}/g, '\n\n').trim();
-      const estimatedTokens = Math.ceil(fallback.length / 4);
-      const maxTokens = node.config.max_tokens || 600;
-      if (estimatedTokens > maxTokens) {
-        fallback = fallback.substring(0, maxTokens * 4) + '...';
-      }
-      return {
-        data: { optimized: fallback, finalResponse: fallback },
-        tokensUsed: 0,
-      };
-    }
-  }
-
-  async handleHandler(node, context) {
-    const templateKey = node.config.template;
-    const language = context.language || context.lastResult?.data?.language || 'english';
-    
-    // Get template - support multi-language
-    let template = '';
-    if (typeof this.workflow.templates[templateKey] === 'object') {
-      template = this.workflow.templates[templateKey][language] || 
-                 this.workflow.templates[templateKey]['english'] || 
-                 '';
-    } else {
-      template = this.workflow.templates[templateKey] || '';
-    }
-    
-    // Replace placeholders if needed
-    let response = template;
-    if (node.config.include_context && context.lastResult?.data) {
-      const data = context.lastResult.data;
-      if (data.questions) {
-        const questions = Array.isArray(data.questions) ? data.questions.join('\n') : data.questions;
-        response = response.replace('{questions}', questions);
-      }
-    }
-    
-    if (process.env.DEBUG === 'true') {
-      console.log(`   [Handler] Template: ${templateKey}, Language: ${language}, Response length: ${response.length}`);
-    }
-    
-    return {
-      data: { 
-        response: response,
-        formatted: response,
-        // Also set as finalResponse for easier extraction
-        finalResponse: response,
-        // Mark greeting so optimizer keeps the structured 3-item message (no rewrite)
-        ...(templateKey === 'greeting' ? { intent: 'greeting' } : {}),
-      },
-      tokensUsed: 0,
-    };
-  }
-
   async handleEscalation(node, context) {
     if (process.env.DEBUG === 'true') {
       console.log('[Workflow] Escalating to human agent');
@@ -1762,93 +905,6 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
       tokensUsed: 0,
       // Explicitly set next to prevent infinite loops
       next: nextNodeId,
-    };
-  }
-
-  handleAction(node, context) {
-    // Try multiple sources for the response - check in order of priority
-    let response = null;
-    
-    // Priority 1: Check last result (most recent)
-    const lastResult = context.lastResult?.data;
-    if (lastResult) {
-      response = lastResult.optimized || 
-                 lastResult.response || 
-                 lastResult.formatted ||
-                 lastResult.finalResponse;
-    }
-    
-    // Priority 2: Walk backwards through workflow steps to find any response
-    if (!response && context.workflowSteps) {
-      for (let i = context.workflowSteps.length - 1; i >= 0; i--) {
-        const step = context.workflowSteps[i];
-        // Check if we have access to the actual result data
-        // We need to check the execution context's stored results
-        const stepData = step.result?.data;
-        if (stepData) {
-          response = stepData.optimized || 
-                     stepData.response || 
-                     stepData.formatted ||
-                     stepData.finalResponse;
-          if (response) break;
-        }
-      }
-    }
-    
-    // Priority 3: Check all previous results in execution context
-    if (!response) {
-      // Look through all stored results
-      const allResults = context.allResults || [];
-      for (let i = allResults.length - 1; i >= 0; i--) {
-        const resultData = allResults[i]?.data;
-        if (resultData) {
-          response = resultData.optimized || 
-                     resultData.response || 
-                     resultData.formatted ||
-                     resultData.finalResponse;
-          if (response) break;
-        }
-      }
-    }
-
-    // Priority 4: Use template based on intent and language
-    if (!response) {
-      const intent = context.lastResult?.data?.intent || 'greeting';
-      const language = context.language || context.lastResult?.data?.language || 'english';
-      
-      // Try to get template
-      const templateKey = intent === 'greeting' ? 'greeting' : `${intent}_response`;
-      let template = '';
-      
-      if (typeof this.workflow.templates[templateKey] === 'object') {
-        template = this.workflow.templates[templateKey][language] || 
-                   this.workflow.templates[templateKey]['english'] || 
-                   '';
-      } else {
-        template = this.workflow.templates[templateKey] || '';
-      }
-      
-      // Fallback to greeting template
-      if (!template && typeof this.workflow.templates.greeting === 'object') {
-        template = this.workflow.templates.greeting[language] || 
-                   this.workflow.templates.greeting['english'] || 
-                   '';
-      } else if (!template) {
-        template = this.workflow.templates.greeting || '';
-      }
-      
-      response = template || 'I apologize, I couldn\'t process that request. Please try rephrasing your question.';
-    }
-
-    if (process.env.DEBUG === 'true') {
-      console.log(`[Action] Final response: ${response?.substring(0, 100)}...`);
-      console.log(`[Action] Response source: ${response ? 'found' : 'NOT FOUND'}`);
-      console.log(`[Action] Last result keys:`, context.lastResult?.data ? Object.keys(context.lastResult.data) : 'none');
-    }
-    
-    return {
-      data: { finalResponse: response },
-      tokensUsed: 0,
     };
   }
 
