@@ -2,6 +2,7 @@ import openai, { TOKEN_CONFIG } from '../config/openai.js';
 import prisma from '../config/database.js';
 import ProductRecommender from '../utils/product-recommender.js';
 import { getMergedEntitiesFromContext } from '../utils/entities.js';
+import { productMatchesRequestedModel } from '../utils/products.js';
 
 /** Known brand names (lowercase) for extraction; can be replaced by DB lookup for full dynamic list */
 const KNOWN_BRANDS = ['yamaha', 'honda', 'kawasaki', 'suzuki', 'modenas', 'ktm', 'benelli'];
@@ -501,8 +502,8 @@ class SearchAgent {
       }
 
       if (requestedModel) {
-        const modelMatches = products.filter(p => this.productMatchesRequestedModel(p, requestedModel));
-        const alternatives = products.filter(p => !this.productMatchesRequestedModel(p, requestedModel));
+        const modelMatches = products.filter(p => productMatchesRequestedModel(p, requestedModel));
+        const alternatives = products.filter(p => !productMatchesRequestedModel(p, requestedModel));
         const altCount = modelMatches.length > 0 ? 1 : 4;
         const ordered = [...modelMatches, ...alternatives.slice(0, altCount)];
         if (process.env.DEBUG === 'true') {
@@ -728,16 +729,6 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
     };
   }
 
-  /** Local helper to match a product against a requested model/brand. */
-  static productMatchesRequestedModel(product, requestedModel) {
-    if (!requestedModel || typeof requestedModel !== 'string') return true;
-    const n = (s) => (s || '').toLowerCase().trim();
-    const key = n(requestedModel);
-    const name = n(product.name);
-    const brand = n(product.brand || '');
-    const model = n(product.features?.model || '');
-    return name.includes(key) || (brand + ' ' + model).trim().includes(key) || model.includes(key);
-  }
 }
 
 export default SearchAgent;

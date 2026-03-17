@@ -1,5 +1,6 @@
 import openai, { TOKEN_CONFIG } from '../config/openai.js';
 import { getLatestEntitiesFromContext } from '../utils/entities.js';
+import { productMatchesRequestedModel } from '../utils/products.js';
 
 /**
  * ResponseAgent
@@ -7,17 +8,6 @@ import { getLatestEntitiesFromContext } from '../utils/entities.js';
  * Keeps WorkflowEngine focused on orchestration.
  */
 class ResponseAgent {
-
-  /** Helper: does a product match the requested model/brand. */
-  static productMatchesRequestedModel(product, requestedModel) {
-    if (!requestedModel || typeof requestedModel !== 'string') return true;
-    const n = (s) => (s || '').toLowerCase().trim();
-    const key = n(requestedModel);
-    const name = n(product.name);
-    const brand = n(product.brand || '');
-    const model = n(product.features?.model || '');
-    return name.includes(key) || (brand + ' ' + model).trim().includes(key) || model.includes(key);
-  }
 
   /** Formatter nodes: build WhatsApp-friendly text from templates and products. */
   static handleFormatter(node, context, workflow) {
@@ -46,7 +36,7 @@ class ResponseAgent {
       products.length > 0 &&
       lastIntent !== 'more_options'
     ) {
-      const hasRequestedModel = products.some(p => this.productMatchesRequestedModel(p, requestedModel));
+      const hasRequestedModel = products.some(p => productMatchesRequestedModel(p, requestedModel));
       if (!hasRequestedModel && workflow.templates.no_model_alternatives) {
         effectiveTemplateKey = 'no_model_alternatives';
       }
