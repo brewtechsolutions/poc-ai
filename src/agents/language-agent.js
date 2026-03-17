@@ -28,15 +28,10 @@ class LanguageAgent {
     const existingLanguage = context.language || context.metadata?.language;
     if (existingLanguage && !context.languageLocked) {
       const normalized = String(existingLanguage).toLowerCase();
-      if (['english', 'malay', 'chinese', 'en', 'bm', 'zh'].includes(normalized)) {
-        context.language =
-          normalized === 'en'
-            ? 'english'
-            : normalized === 'bm'
-              ? 'malay'
-              : normalized === 'zh'
-                ? 'chinese'
-                : normalized;
+      const langMap = { en: 'english', bm: 'malay', zh: 'chinese' };
+      const normalizedLang = langMap[normalized] || normalized;
+      if (['english', 'malay', 'chinese'].includes(normalizedLang)) {
+        context.language = normalizedLang;
         if (process.env.DEBUG === 'true') {
           console.log(`   [LanguageSelector] Language already set: ${context.language}`);
         }
