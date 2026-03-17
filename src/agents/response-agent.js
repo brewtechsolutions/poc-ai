@@ -75,11 +75,19 @@ class ResponseAgent {
           const engineSize = features.engineSize ? `${features.engineSize}cc` : '';
           const type = features.type || product.subcategory || '';
           const locations = features.locations ? ` (${features.locations.join(', ')})` : '';
-          const block = `${i + 1}. *${title}*\n   ${product.description || 'No description'}\n   Price: ${
-            product.currency || 'MYR'
-          } ${product.price?.toLocaleString() || product.price}${locations}\n   ${
-            engineSize ? `Engine: ${engineSize}\n   ` : ''
-          }${type ? `Type: ${type}\n   ` : ''}${product.inStock ? '✅ In Stock' : '❌ Out of Stock'}`;
+
+          const details = [];
+          if (engineSize) details.push(`Engine: ${engineSize}`);
+          if (type) details.push(`Type: ${type}`);
+          details.push(product.inStock ? '✅ In Stock' : '❌ Out of Stock');
+
+          const block = [
+            `${i + 1}. *${title}*`,
+            `   ${product.description || 'No description'}`,
+            `   Price: ${product.currency || 'MYR'} ${product.price?.toLocaleString() || product.price}${locations}`,
+            `   ${details.join('\n   ')}`,
+          ].join('\n');
+
           if (i === 1 && alternativeReasoning) {
             return `💡 ${alternativeReasoning}\n\n${block}`;
           }
