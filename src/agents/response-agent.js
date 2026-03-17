@@ -1,4 +1,5 @@
 import openai, { TOKEN_CONFIG } from '../config/openai.js';
+import { getLatestEntitiesFromContext } from '../utils/entities.js';
 
 /**
  * ResponseAgent
@@ -6,17 +7,6 @@ import openai, { TOKEN_CONFIG } from '../config/openai.js';
  * Keeps WorkflowEngine focused on orchestration.
  */
 class ResponseAgent {
-  /** Helper: get entities from the most recent node that produced them. */
-  static getEntitiesFromContext(context) {
-    const results = context.allResults || [];
-    for (let i = results.length - 1; i >= 0; i--) {
-      const entities = results[i]?.data?.entities;
-      if (entities && typeof entities === 'object' && Object.keys(entities).length > 0) {
-        return entities;
-      }
-    }
-    return context.lastResult?.data?.entities || {};
-  }
 
   /** Helper: does a product match the requested model/brand. */
   static productMatchesRequestedModel(product, requestedModel) {
@@ -36,7 +26,7 @@ class ResponseAgent {
     const lastIntent = context.lastIntent || context.lastResult?.data?.intent;
     // Language is locked to context.language once chosen
     const language = context.language || 'english';
-    const entities = this.getEntitiesFromContext(context);
+    const entities = getLatestEntitiesFromContext(context);
     const modelPart = (entities.model || '').trim();
     const brandPart = (entities.brand || '').trim();
     const requestedModel = !modelPart && !brandPart

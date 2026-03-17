@@ -1,6 +1,7 @@
 import openai, { TOKEN_CONFIG } from '../config/openai.js';
 import prisma from '../config/database.js';
 import ProductRecommender from '../utils/product-recommender.js';
+import { getMergedEntitiesFromContext } from '../utils/entities.js';
 
 /** Known brand names (lowercase) for extraction; can be replaced by DB lookup for full dynamic list */
 const KNOWN_BRANDS = ['yamaha', 'honda', 'kawasaki', 'suzuki', 'modenas', 'ktm', 'benelli'];
@@ -419,7 +420,7 @@ class SearchAgent {
 
     if (node.id === 'context_collector') {
       // Merge entities across turns: previous session context + latest NLP entities
-      const mergedEntities = this.getEntitiesFromContext(context);
+      const mergedEntities = getMergedEntitiesFromContext(context);
       const hasBudget = !!(
         mergedEntities.budget ||
         mergedEntities.price_range ||
@@ -479,7 +480,7 @@ class SearchAgent {
         };
       }
 
-      const entities = this.getEntitiesFromContext(context);
+      const entities = getMergedEntitiesFromContext(context);
       const requestedModel = (entities.model || entities.brand || '').toString().trim();
       const isMoreOptions = context.lastIntent === 'more_options';
 
@@ -725,28 +726,6 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
       tokensUsed: 0,
       confidence: 0,
     };
-  }
-
-  /** Get entities from most recent result in context (local copy). */
-  static getEntitiesFromContext(context) {
-    const results = context.allResults || [];
-    let latestEntities = null;
-    for (let i = results.length - 1; i >= 0; i--) {
-      const entities = results[i]?.data?.entities;
-      if (entities && typeof entities === 'object' && Object.keys(entities).length > 0) {
-        latestEntities = entities;
-        break;
-      }
-    }
-
-    const base =
-      context.entities ||
-      context.metadata?.entities ||
-      context.lastResult?.data?.entities ||
-      {};
-
-    // Merge new entities (from latest NLP/search step) on top of existing ones
-    return latestEntities ? { ...base, ...latestEntities } : base;
   }
 
   /** Local helper to match a product against a requested model/brand. */

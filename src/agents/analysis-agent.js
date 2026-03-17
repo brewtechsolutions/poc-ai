@@ -381,6 +381,41 @@ class AnalysisAgent {
       };
     }
 
+    // Location-only (e.g. "i live at Puchong", "i'm in KL", "area Shah Alam")
+    const locationMatch = lower.match(
+      /(?:live at|stay at|live in|stay in|from|area|located at|i(?:'m| am) (?:at|in))\s+([a-zA-Z\s]+?)(?:\s*$|,|\.|!|\?)/i
+    ) || lower.match(
+      /\b(puchong|petaling jaya|pj|kl|kuala lumpur|shah alam|subang|klang|rawang|cheras|ampang|setapak|kepong|wangsa maju|johor bahru|jb|penang|ipoh|seremban|melaka|kota kinabalu|kk|kuching|miri|sibu)\b/i
+    );
+
+    const hasBudgetOrBrand = /\b(rm|myr)\s*\d|budget|bajet|\b(honda|yamaha|modenas|suzuki|kawasaki)\b/i.test(lower);
+
+    if (locationMatch && !hasBudgetOrBrand) {
+      const area = (locationMatch[1] || locationMatch[0]).trim();
+      if (DEBUG) console.log('[AnalysisAgent] fastPath: location_only', area);
+      return {
+        intent: 'bike_recommendation',
+        entities: { 
+          area: area, 
+          location: area, 
+          budget: context.entities?.budget || '',
+          brand: context.entities?.brand || '',
+          model: context.entities?.model || '',
+        },
+        language: context.language || 'english',
+        confidence: 0.9,
+        suggestedQuestion: null,
+        missingInfo: [],
+        hasAskedBudget: context.hasAskedBudget || false,
+        hasAskedArea: context.hasAskedArea || false,
+        hasAskedModel: context.hasAskedModel || false,
+        salesInsight: null,
+        skipAlreadyShownIds: [],
+        source: 'fast_path',
+        tokensUsed: 0,
+      };
+    }
+
     // Budget-only (more robust patterns)
     const budgetPatterns = [
       /\b(?:rm|myr)\s*([\d,]+)/i, // "RM5000", "MYR 5,000"
