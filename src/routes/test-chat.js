@@ -85,6 +85,17 @@ router.post('/api/test-chat', async (req, res) => {
 
     const result = await workflowEngine.execute(context);
 
+    const getResponseFromData = (data) => {
+      if (!data) return null;
+      return (
+        data.finalResponse ||
+        data.optimized ||
+        data.response ||
+        data.formatted ||
+        null
+      );
+    };
+
     // Persist state for next message so we never re-greet and keep language locked
     if (result.language) {
       session.language = result.language;
@@ -131,21 +142,14 @@ router.post('/api/test-chat', async (req, res) => {
     let response = null;
     
     // Priority 1: Check last result (action node should have finalResponse)
-    if (result.lastResult?.data?.finalResponse) {
-      response = result.lastResult.data.finalResponse;
-    }
+    response = getResponseFromData(result.lastResult?.data);
     
     // Priority 2: Check all results in reverse order
     if (!response && result.allResults) {
       for (let i = result.allResults.length - 1; i >= 0; i--) {
         const resultData = result.allResults[i]?.data;
-        if (resultData) {
-          response = resultData.finalResponse || 
-                     resultData.optimized ||
-                     resultData.response ||
-                     resultData.formatted;
-          if (response) break;
-        }
+        response = getResponseFromData(resultData);
+        if (response) break;
       }
     }
     
@@ -161,9 +165,7 @@ router.post('/api/test-chat', async (req, res) => {
     
     // Priority 4: Check lastResult for any response field
     if (!response && result.lastResult?.data) {
-      response = result.lastResult.data.optimized ||
-                 result.lastResult.data.response ||
-                 result.lastResult.data.formatted;
+      response = getResponseFromData(result.lastResult.data);
     }
     
     // Priority 5: Error handling
