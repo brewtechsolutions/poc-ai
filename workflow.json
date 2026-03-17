@@ -482,7 +482,6 @@
           "model": "gpt-4o-mini",
           "temperature": 0.3,
           "max_tokens": 150,
-          "max_clarifications": 2,
           "system_prompt": "You are a motorcycle sales assistant. The user's message was unclear or we need one more detail. Based on the conversation context, last intent, and what is missing (budget, area/location, model/brand, or something else), generate ONE short, friendly clarification question in the user's language (Malay/Chinese/English). Be specific when possible (e.g. 'Just to confirm, is your budget in RM?' or 'You said Puchong – did you mean our Puchong branch?'). Return JSON with: clarification_message (string), language (malay/chinese/english).",
           "next": "clarification_formatter"
         }
