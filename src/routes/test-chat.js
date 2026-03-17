@@ -37,6 +37,11 @@ router.post('/api/test-chat', async (req, res) => {
         messages: [],
         startTime: Date.now(),
         totalTokens: 0,
+        hasAskedBudget: false,
+        hasAskedArea: false,
+        hasAskedModel: false,
+        skipAlreadyShownIds: [],
+        salesInsights: [],
       };
       sessions.set(currentSessionId, session);
     }
@@ -49,16 +54,28 @@ router.post('/api/test-chat', async (req, res) => {
     };
     session.messages.push(userMessage);
 
-    // Execute workflow
+    // Execute workflow (pass persisted state so we don't re-greet or lose context)
     const workflowEngine = new WorkflowEngine();
     const context = {
       user_message: message,
+      language: session.language,
+      languageLocked: session.languageLocked,
+      lastIntent: session.lastIntent,
       phone_number: session.phoneNumber,
       conversation_id: currentSessionId,
+      entities: session.lastEntities,
+      lastShownProducts: session.lastShownProducts,
+      hasAskedBudget: session.hasAskedBudget || false,
+      hasAskedArea: session.hasAskedArea || false,
+      hasAskedModel: session.hasAskedModel || false,
+      skipAlreadyShownIds: session.skipAlreadyShownIds || [],
       metadata: {
         phone_number: session.phoneNumber,
         message_type: 'text',
         timestamp: new Date().toISOString(),
+        language: session.language,
+        entities: session.lastEntities,
+        lastShownProducts: session.lastShownProducts,
       },
       conversationHistory: session.messages.slice(-5).map(m => ({
         role: m.type === 'user' ? 'user' : 'assistant',
@@ -67,26 +84,72 @@ router.post('/api/test-chat', async (req, res) => {
     };
 
     const result = await workflowEngine.execute(context);
+
+    const getResponseFromData = (data) => {
+      if (!data) return null;
+      return (
+        data.finalResponse ||
+        data.optimized ||
+        data.response ||
+        data.formatted ||
+        null
+      );
+    };
+
+    // Persist state for next message so we never re-greet and keep language locked
+    if (result.language) {
+      session.language = result.language;
+    }
+    if (result.languageLocked !== undefined) {
+      session.languageLocked = result.languageLocked;
+    }
+    if (result.lastIntent !== undefined) {
+      session.lastIntent = result.lastIntent;
+    }
+    // Persist AnalysisAgent tracking flags
+    if (result.hasAskedBudget !== undefined) session.hasAskedBudget = result.hasAskedBudget;
+    if (result.hasAskedArea !== undefined) session.hasAskedArea = result.hasAskedArea;
+    if (result.hasAskedModel !== undefined) session.hasAskedModel = result.hasAskedModel;
+
+    // Accumulate shown product IDs so agent never re-shows them
+    if (result.skipAlreadyShownIds?.length > 0) {
+      const existing = new Set(session.skipAlreadyShownIds || []);
+      result.skipAlreadyShownIds.forEach(id => existing.add(id));
+      session.skipAlreadyShownIds = [...existing];
+    }
+
+    // Keep last sales insight for logging/dashboard
+    if (result.salesInsight) {
+      session.salesInsights = [...(session.salesInsights || []), result.salesInsight].slice(-5);
+    }
+
+    // Merge entities: AnalysisAgent first, then legacy allResults, never lose previously known
+    const analysisEntities = result.analysisEntities || {};
+    const legacyEntities = result.allResults
+      ?.find(r => r.data?.entities && Object.keys(r.data.entities).length > 0)
+      ?.data?.entities || {};
+    const merged = { ...(session.lastEntities || {}), ...legacyEntities, ...analysisEntities };
+    if (Object.keys(merged).length > 0) {
+      session.lastEntities = merged;
+    }
+    // Persist last shown products so user can select by number/name for full details
+    const productsFromResult = result.allResults?.find(r => r.data?.products && Array.isArray(r.data.products))?.data?.products;
+    if (productsFromResult && productsFromResult.length > 0) {
+      session.lastShownProducts = productsFromResult;
+    }
     
     // Extract response - check multiple sources
     let response = null;
     
     // Priority 1: Check last result (action node should have finalResponse)
-    if (result.lastResult?.data?.finalResponse) {
-      response = result.lastResult.data.finalResponse;
-    }
+    response = getResponseFromData(result.lastResult?.data);
     
     // Priority 2: Check all results in reverse order
     if (!response && result.allResults) {
       for (let i = result.allResults.length - 1; i >= 0; i--) {
         const resultData = result.allResults[i]?.data;
-        if (resultData) {
-          response = resultData.finalResponse || 
-                     resultData.optimized ||
-                     resultData.response ||
-                     resultData.formatted;
-          if (response) break;
-        }
+        response = getResponseFromData(resultData);
+        if (response) break;
       }
     }
     
@@ -102,9 +165,7 @@ router.post('/api/test-chat', async (req, res) => {
     
     // Priority 4: Check lastResult for any response field
     if (!response && result.lastResult?.data) {
-      response = result.lastResult.data.optimized ||
-                 result.lastResult.data.response ||
-                 result.lastResult.data.formatted;
+      response = getResponseFromData(result.lastResult.data);
     }
     
     // Priority 5: Error handling
@@ -145,12 +206,14 @@ router.post('/api/test-chat', async (req, res) => {
       success: true,
       sessionId: currentSessionId,
       response: response,
+      language: result.language || session.language,
       conversation: {
         messages: session.messages,
         stats: {
           totalMessages: session.messages.length,
           totalTokens: session.totalTokens,
           duration: Date.now() - session.startTime,
+          language: session.language,
         },
       },
       debug: {
@@ -163,6 +226,9 @@ router.post('/api/test-chat', async (req, res) => {
         workflowSteps: result.workflowSteps || [],
         errors: result.errors || [],
         lastResultKeys: result.lastResult ? Object.keys(result.lastResult.data || {}) : [],
+        salesInsight: result.salesInsight || null,
+        missingInfo: result.missingInfo || [],
+        analysisSource: result.analysisSource || null,
       },
     });
   } catch (error) {
