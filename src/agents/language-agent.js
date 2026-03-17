@@ -243,7 +243,7 @@ class LanguageAgent {
     // Positive one-word replies like "想", "要", "ok", "yes" that depend on the previous bot question.
     // Example: bot asked "你想知道更多细节吗？" and user replies "想" -> intent should be "more_details".
     if (trimmed.length > 0 && trimmed.length <= 8) {
-      const positiveReplies = [
+      const positiveReplies = new Set([
         'yes',
         'ok',
         'okay',
@@ -263,8 +263,8 @@ class LanguageAgent {
         'dah ready',
         '嗯',
         '可以',
-      ];
-      const negativeReplies = [
+      ]);
+      const negativeReplies = new Set([
         'no',
         'nope',
         'tak',
@@ -273,10 +273,10 @@ class LanguageAgent {
         '不要',
         '不用',
         '不要了',
-      ];
+      ]);
 
-      const isPositive = positiveReplies.includes(lower) || positiveReplies.includes(trimmed);
-      const isNegative = negativeReplies.includes(lower) || negativeReplies.includes(trimmed);
+      const isPositive = positiveReplies.has(lower) || positiveReplies.has(trimmed);
+      const isNegative = negativeReplies.has(lower) || negativeReplies.has(trimmed);
 
       if (isPositive || isNegative) {
         const lastIntent = context.lastIntent || context.lastResult?.data?.intent;
