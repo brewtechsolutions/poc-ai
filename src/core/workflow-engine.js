@@ -7,6 +7,7 @@ import ImageProcessor from '../utils/image-processor.js';
 import VoiceProcessor from '../utils/voice-processor.js';
 import SearchAgent from '../agents/search-agent.js';
 import LanguageAgent from '../agents/language-agent.js';
+import AnalysisAgent from '../agents/analysis-agent.js';
 import ResponseAgent from '../agents/response-agent.js';
 
 // Load workflow JSON without import assertions for broader Node compatibility
@@ -161,6 +162,16 @@ class WorkflowEngine {
     }
 
     executionContext.responseTime = Date.now() - executionContext.startTime;
+
+    // Surface AnalysisAgent outputs for route/session persistence
+    executionContext.hasAskedBudget = executionContext.hasAskedBudget || false;
+    executionContext.hasAskedArea = executionContext.hasAskedArea || false;
+    executionContext.hasAskedModel = executionContext.hasAskedModel || false;
+    executionContext.skipAlreadyShownIds = executionContext.skipAlreadyShownIds || [];
+    executionContext.salesInsight = executionContext.salesInsight || null;
+    executionContext.missingInfo = executionContext.missingInfo || [];
+    executionContext.analysisEntities = executionContext.entities || {};
+    executionContext.analysisSource = executionContext.lastResult?.data?.source || null;
     
     if (DEBUG) {
       console.log(`\n[Workflow] ✓ Completed in ${executionContext.responseTime}ms`);
@@ -186,8 +197,16 @@ class WorkflowEngine {
       
       case 'classifier':
         return this.handleClassifier(node, context);
+
+      case 'analysis_agent':
+        return await this.handleAnalysisAgent(node, context);
+
+      case 'analysis_router':
+        return this.handleAnalysisRouter(node, context);
       
       case 'nlp':
+        // Used by legacy voice/image fallback paths.
+        // Text messages now go through analysis_agent instead.
         return await LanguageAgent.handleNLP(node, context, { nodes: this.nodes });
       
       case 'router':
@@ -464,6 +483,99 @@ class WorkflowEngine {
       tokensUsed: 0,
       next: route?.next,
     };
+  }
+
+  /**
+   * AnalysisAgent: run intent/entity analysis and write to context for analysis_router.
+   * Uses the dedicated AnalysisAgent (separate from search engine / LanguageAgent).
+   */
+  async handleAnalysisAgent(node, context) {
+    const plan = await AnalysisAgent.analyze(context, {
+      activeSkills: node.config?.active_skills || AnalysisAgent.listSkills(),
+      model: node.config?.model,
+      temperature: node.config?.temperature,
+      max_tokens: node.config?.max_tokens,
+    });
+    const tokensUsed = plan.tokensUsed ?? 0;
+    context.entities = { ...(context.entities || {}), ...(plan.entities || {}) };
+    if (plan.hasAskedBudget !== undefined) context.hasAskedBudget = plan.hasAskedBudget;
+    if (plan.hasAskedArea !== undefined) context.hasAskedArea = plan.hasAskedArea;
+    if (plan.hasAskedModel !== undefined) context.hasAskedModel = plan.hasAskedModel;
+    if (plan.skipAlreadyShownIds?.length > 0) context.skipAlreadyShownIds = plan.skipAlreadyShownIds;
+    if (plan.salesInsight != null) context.salesInsight = plan.salesInsight;
+    if (plan.suggestedQuestion != null) context.suggestedQuestion = plan.suggestedQuestion;
+    if (plan.missingInfo?.length > 0) context.missingInfo = plan.missingInfo;
+    return {
+      data: {
+        intent: plan.intent,
+        // merged entities for downstream nodes
+        entities: context.entities,
+        // turn-local entities from this AnalysisAgent call
+        entitiesForTurn: plan.entities || {},
+        language: plan.language,
+        confidence: plan.confidence,
+        source: plan.source,
+        suggestedQuestion: plan.suggestedQuestion,
+        missingInfo: plan.missingInfo || [],
+        hasAskedBudget: plan.hasAskedBudget,
+        hasAskedArea: plan.hasAskedArea,
+        hasAskedModel: plan.hasAskedModel,
+        salesInsight: plan.salesInsight,
+      },
+      tokensUsed,
+      next: node.config?.next || 'analysis_router',
+    };
+  }
+
+  /**
+   * AnalysisRouter: route by intent from analysis plan.
+   * When user already gave a model/brand, go to bike_search first to check we have it.
+   * When user only gave budget (no model/brand) this turn, go to bike_search in budget_only mode.
+   */
+  handleAnalysisRouter(node, context) {
+    const result = LanguageAgent.handleRouter(node, context);
+    const intent = result.data?.intent;
+
+    // Prefer entities from this turn (from AnalysisAgent) over merged history
+    const turnEntities =
+      context.lastResult?.data?.entitiesForTurn ||
+      result.data?.entities ||
+      {};
+
+    const hasBudget =
+      !!(turnEntities.budget || turnEntities.price);
+    const hasBrand =
+      !!(turnEntities.brand && String(turnEntities.brand).trim());
+    const hasModel =
+      !!(turnEntities.model && String(turnEntities.model).trim());
+
+    // 1) Budget-only: user gave budget but NO model/brand in this turn.
+    if (intent === 'bike_recommendation' && hasBudget && !hasBrand && !hasModel) {
+      context.searchType = 'budget_only';
+      if (process.env.DEBUG === 'true') {
+        console.log('   [AnalysisRouter] Budget-only bike_recommendation → bike_search (budget_only)', turnEntities);
+      }
+      return {
+        ...result,
+        data: {
+          ...result.data,
+          searchType: 'budget_only',
+        },
+        next: 'bike_search',
+      };
+    }
+
+    // 2) Model/brand present in this turn → model/brand-first search
+    const hasModelOrBrand = hasBrand || hasModel;
+    if (intent === 'bike_recommendation' && hasModelOrBrand) {
+      if (process.env.DEBUG === 'true') {
+        console.log('   [AnalysisRouter] User gave model/brand this turn → bike_search first', turnEntities);
+      }
+      return { ...result, next: 'bike_search' };
+    }
+
+    // 3) Fall back to default routing
+    return result;
   }
 
 
@@ -833,6 +945,42 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
 
     // Generic ML: nodes with system_prompt that return JSON (clarification_handler, smart_question_generator, no_results_handler)
     if (node.config.system_prompt && node.config.next) {
+      // Brand unavailable: user asked for a brand we don't stock — use template, no LLM
+      if (node.id === 'no_results_handler' && context.lastResult?.data?.brandUnavailable) {
+        const d = context.lastResult.data;
+        const brand = d.brandRequested || 'that brand';
+        const availableBrands = Array.isArray(d.availableBrands) ? d.availableBrands.join(', ') : '';
+        const lang = context.language || 'english';
+        const templates = this.workflow.templates?.brand_not_available;
+        let message = templates?.[lang] || templates?.english || `Sorry, we don't have *${brand}* in our inventory. We have: ${availableBrands}. Which brand are you interested in?`;
+        message = message.replace(/\{brand\}/g, brand).replace(/\{available_brands\}/g, availableBrands);
+        if (process.env.DEBUG === 'true') console.log('[Workflow] Brand unavailable response:', brand, availableBrands);
+        return {
+          data: { message, intent: 'no_results' },
+          tokensUsed: 0,
+          confidence: 0.95,
+        };
+      }
+      // If AnalysisAgent already generated a question, use it directly — no LLM call needed
+      if (node.id === 'smart_question_generator') {
+        const prebuiltQuestion = context.suggestedQuestion || context.lastResult?.data?.suggestedQuestion;
+        if (prebuiltQuestion) {
+          if (process.env.DEBUG === 'true') {
+            console.log(`[SmartQuestion] Using pre-built question from AnalysisAgent: "${prebuiltQuestion}"`);
+          }
+          return {
+            data: {
+              question: prebuiltQuestion,
+              question_type: context.lastResult?.data?.missingInfo?.[0] || 'other',
+              language: context.language || 'english',
+              formatted: prebuiltQuestion,
+              response: prebuiltQuestion,
+            },
+            tokensUsed: 0,
+            next: node.config?.next || 'question_formatter',
+          };
+        }
+      }
       try {
         const systemPrompt = node.config.system_prompt;
         let userContent = typeof userQuery === 'string' ? userQuery : String(context.user_message || '');

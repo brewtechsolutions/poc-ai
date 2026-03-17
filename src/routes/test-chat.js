@@ -37,6 +37,11 @@ router.post('/api/test-chat', async (req, res) => {
         messages: [],
         startTime: Date.now(),
         totalTokens: 0,
+        hasAskedBudget: false,
+        hasAskedArea: false,
+        hasAskedModel: false,
+        skipAlreadyShownIds: [],
+        salesInsights: [],
       };
       sessions.set(currentSessionId, session);
     }
@@ -60,6 +65,10 @@ router.post('/api/test-chat', async (req, res) => {
       conversation_id: currentSessionId,
       entities: session.lastEntities,
       lastShownProducts: session.lastShownProducts,
+      hasAskedBudget: session.hasAskedBudget || false,
+      hasAskedArea: session.hasAskedArea || false,
+      hasAskedModel: session.hasAskedModel || false,
+      skipAlreadyShownIds: session.skipAlreadyShownIds || [],
       metadata: {
         phone_number: session.phoneNumber,
         message_type: 'text',
@@ -86,10 +95,31 @@ router.post('/api/test-chat', async (req, res) => {
     if (result.lastIntent !== undefined) {
       session.lastIntent = result.lastIntent;
     }
-    // Persist last search entities so "got others?" / more_options can reuse criteria
-    const entitiesFromResult = result.allResults?.find(r => r.data?.entities && Object.keys(r.data.entities).length > 0)?.data?.entities;
-    if (entitiesFromResult && (entitiesFromResult.budget || entitiesFromResult.area || entitiesFromResult.location)) {
-      session.lastEntities = entitiesFromResult;
+    // Persist AnalysisAgent tracking flags
+    if (result.hasAskedBudget !== undefined) session.hasAskedBudget = result.hasAskedBudget;
+    if (result.hasAskedArea !== undefined) session.hasAskedArea = result.hasAskedArea;
+    if (result.hasAskedModel !== undefined) session.hasAskedModel = result.hasAskedModel;
+
+    // Accumulate shown product IDs so agent never re-shows them
+    if (result.skipAlreadyShownIds?.length > 0) {
+      const existing = new Set(session.skipAlreadyShownIds || []);
+      result.skipAlreadyShownIds.forEach(id => existing.add(id));
+      session.skipAlreadyShownIds = [...existing];
+    }
+
+    // Keep last sales insight for logging/dashboard
+    if (result.salesInsight) {
+      session.salesInsights = [...(session.salesInsights || []), result.salesInsight].slice(-5);
+    }
+
+    // Merge entities: AnalysisAgent first, then legacy allResults, never lose previously known
+    const analysisEntities = result.analysisEntities || {};
+    const legacyEntities = result.allResults
+      ?.find(r => r.data?.entities && Object.keys(r.data.entities).length > 0)
+      ?.data?.entities || {};
+    const merged = { ...(session.lastEntities || {}), ...legacyEntities, ...analysisEntities };
+    if (Object.keys(merged).length > 0) {
+      session.lastEntities = merged;
     }
     // Persist last shown products so user can select by number/name for full details
     const productsFromResult = result.allResults?.find(r => r.data?.products && Array.isArray(r.data.products))?.data?.products;
@@ -194,6 +224,9 @@ router.post('/api/test-chat', async (req, res) => {
         workflowSteps: result.workflowSteps || [],
         errors: result.errors || [],
         lastResultKeys: result.lastResult ? Object.keys(result.lastResult.data || {}) : [],
+        salesInsight: result.salesInsight || null,
+        missingInfo: result.missingInfo || [],
+        analysisSource: result.analysisSource || null,
       },
     });
   } catch (error) {

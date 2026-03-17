@@ -42,7 +42,7 @@
             {
               "type": "text",
               "conditions": ["message_type === 'text'"],
-              "next": "language_detector"
+              "next": "analysis_agent"
             },
             {
               "type": "image",
@@ -55,6 +55,54 @@
               "next": "voice_processor"
             }
           ]
+        }
+      },
+      {
+        "id": "analysis_agent",
+        "type": "analysis_agent",
+        "name": "Analysis Agent",
+        "config": {
+          "active_skills": [
+            "consultative_selling",
+            "budget_intelligence",
+            "local_market_expert",
+            "context_memory",
+            "escalation_radar",
+            "objection_handler",
+            "financing_advisor",
+            "trade_in_specialist"
+          ],
+          "next": "analysis_router"
+        }
+      },
+      {
+        "id": "analysis_router",
+        "type": "analysis_router",
+        "name": "Analysis Router",
+        "config": {
+          "routes": [
+            { "intent": "greeting", "next": "greeting_handler" },
+            { "intent": "inquire_about_motorcycle", "next": "bike_search" },
+            { "intent": "search_motorcycle", "next": "bike_search" },
+            { "intent": "bike_inquiry", "next": "context_collector" },
+            { "intent": "bike_recommendation", "next": "context_collector" },
+            { "intent": "more_options", "next": "bike_search" },
+            { "intent": "more_details", "next": "more_details_handler" },
+            { "intent": "model_selection", "next": "model_details_handler" },
+            { "intent": "price_inquiry", "next": "price_lookup" },
+            { "intent": "budget_question", "next": "budget_handler" },
+            { "intent": "area_question", "next": "area_handler" },
+            { "intent": "model_question", "next": "model_handler" },
+            { "intent": "specification_question", "next": "specification_lookup" },
+            { "intent": "test_ride_request", "next": "test_ride_info_handler" },
+            { "intent": "test_ride_booking", "next": "test_ride_handler" },
+            { "intent": "financing_question", "next": "financing_handler" },
+            { "intent": "trade_in_question", "next": "trade_in_handler" },
+            { "intent": "agent_request", "next": "agent_escalation" },
+            { "intent": "complaint", "next": "agent_escalation" },
+            { "intent": "goodbye", "next": "goodbye_handler" }
+          ],
+          "fallback": "clarification_handler"
         }
       },
       {
@@ -673,6 +721,11 @@
         "english": "Sorry, we don't sell this bike. We don't have it in our stock right now.\n\nYou can:\n1. Try a different budget or area\n2. Ask for other models we have\n3. Talk to our team for help\n\nWhat would you like to do?",
         "malay": "Maaf, kami tidak menjual motosikal ini. Kami tidak memilikinya dalam stok sekarang.\n\nAnda boleh:\n1. Cuba bajet atau kawasan lain\n2. Minta model lain yang kami ada\n3. Bercakap dengan pasukan kami untuk bantuan\n\nApa yang anda mahu lakukan?",
         "chinese": "抱歉，我们没有卖这款摩托车。目前没有货。\n\n您可以：\n1. 试试其他预算或地区\n2. 询问我们有的其他型号\n3. 联系我们的团队获取帮助\n\n您想怎么做？"
+      },
+      "brand_not_available": {
+        "english": "Sorry, we don't have *{brand}* in our inventory right now.\n\nWe do have: {available_brands}\n\nWhich brand are you interested in?",
+        "malay": "Maaf, kami tidak ada *{brand}* dalam stok kami sekarang.\n\nKami ada: {available_brands}\n\nAnda berminat dengan jenama yang mana?",
+        "chinese": "抱歉，我们目前没有 *{brand}* 的车款。\n\n不过我们有以下品牌：{available_brands}\n\n你有兴趣了解哪个品牌？"
       },
       "more_details_prompt": {
         "english": "Which bike would you like full details on? Reply with the number (e.g. 1 or 2) or the bike name, and I'll give you specs, price, and availability. You can also say \"got others?\" for more options.",

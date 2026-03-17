@@ -165,7 +165,7 @@ class ResponseAgent {
     }
 
     const lang = context.language || 'english';
-    const base = `You must respond ONLY in ${lang}. Never switch languages.`;
+    const base = `You must respond ONLY in ${lang}. Never switch languages. Always use MYR or RM for prices (Malaysian Ringgit). Never use $ or USD.`;
     const systemPrompt =
       `${base}\n\n` +
       (node.config.system_prompt ||

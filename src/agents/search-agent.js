@@ -2,6 +2,69 @@ import openai, { TOKEN_CONFIG } from '../config/openai.js';
 import prisma from '../config/database.js';
 import ProductRecommender from '../utils/product-recommender.js';
 
+/** Known brand names (lowercase) for extraction; can be replaced by DB lookup for full dynamic list */
+const KNOWN_BRANDS = ['yamaha', 'honda', 'kawasaki', 'suzuki', 'modenas', 'ktm', 'benelli'];
+
+/** Hard cap for "slightly over budget" (budget + 999). Adjust to fit inventory spread. */
+const BUDGET_OVER_CAP = 999;
+
+/**
+ * Extract budget from message. Three patterns to cover common Malaysian budget phrases.
+ * Handles: RM5000, MYR 5,000, budget of RM5000, i have the budget of RM5000, my budget is 5000, 5000rm, 5000 ringgit.
+ * @returns {number|null} Budget amount or null
+ */
+function extractBudgetFromMessage(message) {
+  if (!message || typeof message !== 'string') return null;
+  const cleaned = message.toLowerCase().trim();
+
+  // Pattern 1: RM/MYR directly before number → "RM5000", "MYR 5,000"
+  const prefixMatch = cleaned.match(/(?:rm|myr)\s?(\d[\d,]*)/);
+  if (prefixMatch) {
+    const num = parseInt(prefixMatch[1].replace(/,/g, ''), 10);
+    return Number.isNaN(num) ? null : num;
+  }
+
+  // Pattern 2: number followed by RM/MYR/ringgit → "5000rm", "5000 ringgit"
+  const suffixMatch = cleaned.match(/(\d[\d,]*)\s?(?:rm|myr|ringgit)/);
+  if (suffixMatch) {
+    const num = parseInt(suffixMatch[1].replace(/,/g, ''), 10);
+    return Number.isNaN(num) ? null : num;
+  }
+
+  // Pattern 3: "budget" keyword near a number → "budget of 5000", "my budget is rm5000", "budget of RM5000"
+  const budgetMatch = cleaned.match(/budget[^0-9]*(\d[\d,]*)/);
+  if (budgetMatch) {
+    const num = parseInt(budgetMatch[1].replace(/,/g, ''), 10);
+    return Number.isNaN(num) ? null : num;
+  }
+
+  return null;
+}
+
+/**
+ * Extract brand from user message (e.g. "有kawasaki吗" -> "kawasaki").
+ * @returns {string|null} Normalized brand name (title case for display) or null
+ */
+function extractBrandFromMessage(message) {
+  if (!message || typeof message !== 'string') return null;
+  const lower = message.toLowerCase().trim();
+  const found = KNOWN_BRANDS.find(b => lower.includes(b));
+  return found ? found.charAt(0).toUpperCase() + found.slice(1) : null;
+}
+
+/**
+ * Get list of brands that exist in inventory (active, in stock).
+ * @returns {Promise<string[]>} Sorted array of brand names
+ */
+async function getAvailableBrandsFromDb() {
+  const rows = await prisma.product.findMany({
+    where: { active: true, inStock: true, brand: { not: null } },
+    select: { brand: true },
+  });
+  const brands = [...new Set(rows.map(r => r.brand).filter(Boolean))].sort();
+  return brands;
+}
+
 /**
  * SearchAgent - handles product search, ranking and related ML nodes
  * This keeps WorkflowEngine focused on orchestration while this module
@@ -46,16 +109,72 @@ class SearchAgent {
     const entities = lastResult?.entities || context.entities || context.metadata?.entities || {};
     const category = node.config.category || entities.category || null;
     const isMoreOptions = context.lastIntent === 'more_options';
-
-    const modelSearchText = (entities.model || entities.brand || '').toString().trim();
-    const hasRequestedModel = !isMoreOptions && modelSearchText.length > 0;
-    const primarySearchText = modelSearchText || query;
-    const searchTerms = primarySearchText.toLowerCase().split(/\s+/).filter(t => t.length > 2);
-    const budgetNum = entities.budget ? parseFloat(entities.budget) : null;
-
+    const skipIds = context.skipAlreadyShownIds || [];
     const limit = isMoreOptions
       ? (node.config.more_options_limit || 10)
       : (node.config.limit || 15);
+
+    const searchType = context.searchType || lastResult?.searchType || null;
+    const isBudgetOnly = searchType === 'budget_only';
+
+    // Brand-availability check: if user asks for a specific brand only, query DB first.
+    // Skip this in budget_only mode.
+    if (!isBudgetOnly) {
+      const brandFromMessage = extractBrandFromMessage(query);
+      const brandFromEntities = (entities.brand || '').toString().trim();
+      const requestedBrandOnly = (brandFromMessage || brandFromEntities) && !(entities.model || '').toString().trim();
+      const brandToCheck = (brandFromMessage || brandFromEntities || '').toLowerCase();
+      if (requestedBrandOnly && brandToCheck && !isMoreOptions) {
+        const brandProducts = await prisma.product.findMany({
+          where: {
+            active: true,
+            inStock: true,
+            brand: { equals: brandToCheck, mode: 'insensitive' },
+          },
+          take: limit,
+          orderBy: { popularity: 'desc' },
+        });
+        if (brandProducts.length > 0) {
+          const displayBrand = brandFromMessage || brandFromEntities;
+          return {
+            data: {
+              products: brandProducts,
+              brandRequested: displayBrand,
+            },
+            tokensUsed: 0,
+            found: true,
+          };
+        }
+        // Brand requested but not in inventory — return special payload so we don't recommend other brands
+        const availableBrands = await getAvailableBrandsFromDb();
+        const displayBrand = brandFromMessage || (brandFromEntities || brandToCheck).charAt(0).toUpperCase() + brandToCheck.slice(1);
+        if (process.env.DEBUG === 'true') {
+          console.log(`   [bike_search] Brand "${displayBrand}" not in inventory. Available: ${availableBrands.join(', ')}`);
+        }
+        return {
+          data: {
+            products: [],
+            found: false,
+            brandUnavailable: true,
+            brandRequested: displayBrand,
+            availableBrands,
+          },
+          tokensUsed: 0,
+          found: false,
+        };
+      }
+    }
+
+    const modelSearchText = (entities.model || entities.brand || '').toString().trim();
+    const hasRequestedModel = !isMoreOptions && !isBudgetOnly && modelSearchText.length > 0;
+    const primarySearchText = modelSearchText || query;
+    const searchTerms = primarySearchText.toLowerCase().split(/\s+/).filter(t => t.length > 2);
+    const rawBudget = entities.budget ? String(entities.budget).replace(/,/g, '') : null;
+    const budgetNum = rawBudget ? parseFloat(rawBudget) : extractBudgetFromMessage(query);
+    const budgetCap = budgetNum != null ? budgetNum + BUDGET_OVER_CAP : null;
+    if (process.env.DEBUG === 'true' && budgetNum != null) {
+      console.log('[Budget Extracted]', budgetNum, rawBudget ? '(from entities)' : '(from message)');
+    }
 
     let finalProducts = [];
 
@@ -64,6 +183,7 @@ class SearchAgent {
         AND: [
           { active: true },
           { inStock: true },
+          ...(skipIds.length > 0 ? [{ id: { notIn: skipIds } }] : []),
           {
             OR: [
               { name: { contains: primarySearchText, mode: 'insensitive' } },
@@ -84,8 +204,9 @@ class SearchAgent {
       });
 
       let afterBudget = modelMatches;
-      if (budgetNum != null) {
-        afterBudget = modelMatches.filter(p => p.price <= budgetNum);
+      if (budgetCap != null) {
+        afterBudget = modelMatches.filter(p => p.price != null && p.price <= budgetCap);
+        if (afterBudget.length === 0) afterBudget = modelMatches;
       }
 
       let afterArea = afterBudget;
@@ -110,7 +231,8 @@ class SearchAgent {
             AND: [
               { active: true },
               { inStock: true },
-              { price: { lte: budgetNum } },
+              ...(skipIds.length > 0 ? [{ id: { notIn: skipIds } }] : []),
+              ...(budgetCap != null ? [{ price: { lte: budgetCap } }] : []),
               { id: { notIn: [...modelIds] } },
             ],
           };
@@ -135,10 +257,11 @@ class SearchAgent {
             AND: [
               { active: true },
               { inStock: true },
+              ...(skipIds.length > 0 ? [{ id: { notIn: skipIds } }] : []),
               { id: { notIn: [...modelIds] } },
             ],
           };
-          if (budgetNum != null) altConditions.AND.push({ price: { lte: budgetNum } });
+          if (budgetCap != null) altConditions.AND.push({ price: { lte: budgetCap } });
           const alternatives = await prisma.product.findMany({
             where: altConditions,
             take: 10,
@@ -170,6 +293,7 @@ class SearchAgent {
             AND: [
               { active: true },
               { inStock: true },
+              ...(skipIds.length > 0 ? [{ id: { notIn: skipIds } }] : []),
               { OR: orConditions },
             ],
           };
@@ -179,8 +303,8 @@ class SearchAgent {
             orderBy: { popularity: 'desc' },
           });
           let nearFiltered = nearMatches;
-          if (budgetNum != null) {
-            nearFiltered = nearMatches.filter(p => p.price <= budgetNum);
+          if (budgetCap != null) {
+            nearFiltered = nearMatches.filter(p => p.price != null && p.price <= budgetCap);
             if (nearFiltered.length === 0) nearFiltered = nearMatches;
           }
           if (entities.area) {
@@ -202,6 +326,7 @@ class SearchAgent {
         AND: [
           { active: true },
           { inStock: true },
+          ...(skipIds.length > 0 ? [{ id: { notIn: skipIds } }] : []),
         ],
       };
 
@@ -218,8 +343,8 @@ class SearchAgent {
         });
       }
 
-      if (!isMoreOptions && budgetNum != null) {
-        baseConditions.AND.push({ price: { lte: budgetNum } });
+      if (!isMoreOptions && budgetCap != null) {
+        baseConditions.AND.push({ price: { lte: budgetCap } });
       }
 
       const products = await prisma.product.findMany({
@@ -249,12 +374,30 @@ class SearchAgent {
     const useFallbackWhenEmpty = node.config.use_fallback_when_empty === true;
     if ((!finalProducts || finalProducts.length === 0) && useFallbackWhenEmpty) {
       const fallbackLimit = node.config.fallback_limit || 5;
+      const fallbackWhere = {
+        AND: [
+          { active: true },
+          { inStock: true },
+          ...(skipIds.length > 0 ? [{ id: { notIn: skipIds } }] : []),
+        ],
+      };
       const fallbackProducts = await prisma.product.findMany({
-        where: { active: true, inStock: true },
+        where: fallbackWhere,
         orderBy: { popularity: 'desc' },
         take: fallbackLimit,
       });
       finalProducts = fallbackProducts;
+    }
+
+    // Two groups: within budget (≤ budget), then slightly over (budget+1 to budget+999). Within sorted price DESC (best value first), over sorted price ASC (cheapest over first). Max 5 within + 3 over.
+    if (budgetNum != null && budgetCap != null && finalProducts && finalProducts.length > 0) {
+      const within = finalProducts.filter(p => p.price != null && p.price <= budgetNum)
+        .sort((a, b) => (b.price || 0) - (a.price || 0))
+        .slice(0, 5);
+      const slightlyOver = finalProducts.filter(p => p.price != null && p.price > budgetNum && p.price <= budgetCap)
+        .sort((a, b) => (a.price || 0) - (b.price || 0))
+        .slice(0, 3);
+      finalProducts = within.length > 0 || slightlyOver.length > 0 ? [...within, ...slightlyOver] : finalProducts;
     }
 
     return {
@@ -374,10 +517,22 @@ class SearchAgent {
             else if (lang === 'chinese') recommendationReasoning = '我们没有该型号；以下是相近或同品牌的选择。';
             else recommendationReasoning = 'We don\'t have that exact model; here are similar or same-brand options that might suit you.';
           } else {
+            const lang = context.language || entities.language || 'english';
+            const budgetNum = entities.budget ? parseFloat(String(entities.budget).replace(/,/g, '')) : null;
+            const firstBike = ordered[0];
+            const isPriceyForBudget = budgetNum != null && firstBike.price != null && firstBike.price > budgetNum;
+            const budgetFormatted = budgetNum != null ? `RM ${Number(budgetNum).toLocaleString()}` : '';
+
+            // When we have the model but it's above their budget, always include this line first
+            let priceyIntro = '';
+            if (isPriceyForBudget && budgetFormatted) {
+              if (lang === 'malay') priceyIntro = `Kami ada model yang anda minta, tapi harganya sedikit tinggi untuk anda sebab bajet anda ${budgetFormatted}.`;
+              else if (lang === 'chinese') priceyIntro = `我们有您要的型号，但对您来说有点贵，因为您的预算是 ${budgetFormatted}。`;
+              else priceyIntro = `We've got the model you asked for, but it's a bit pricey for you since your budget is ${budgetFormatted}.`;
+            }
+
             try {
-              const lang = context.language || entities.language || 'english';
               const budgetStr = entities.budget ? `RM ${entities.budget}` : 'your budget';
-              const firstBike = ordered[0];
               const firstPrice = firstBike.price != null ? `MYR ${Number(firstBike.price).toLocaleString()}` : '';
               const secondBike = ordered[1];
               const systemPrompt = 'You are a friendly motorcycle sales assistant. Return JSON with two short sentences in the user\'s language (English, Malay, or Chinese): model_reasoning = why the first bike is shown (they asked for this model but it may be a bit above budget). alternative_reasoning = why the second bike is recommended (e.g. fits their budget and is available in their area). Keep each 1 sentence, warm and helpful.';
@@ -394,19 +549,19 @@ class SearchAgent {
               });
               reasoningTokensUsed = completion.usage?.total_tokens || 0;
               const parsed = JSON.parse(completion.choices[0].message.content || '{}');
-              recommendationReasoning = (parsed.model_reasoning || '').trim();
+              const llmModelReasoning = (parsed.model_reasoning || '').trim();
               alternativeReasoning = (parsed.alternative_reasoning || '').trim();
+              recommendationReasoning = priceyIntro ? (priceyIntro + (llmModelReasoning ? ' ' + llmModelReasoning : '')) : llmModelReasoning;
             } catch (err) {
               if (process.env.DEBUG === 'true') console.log('   [bike_ranker] Reasoning fallback:', err.message);
-              const lang = context.language || 'english';
               if (lang === 'malay') {
-                recommendationReasoning = 'Berdasarkan model pilihan anda, saya jumpa padanan — harganya sedikit melebihi bajet.';
+                recommendationReasoning = priceyIntro || 'Berdasarkan model pilihan anda, saya jumpa padanan — harganya sedikit melebihi bajet.';
                 alternativeReasoning = 'Pilihan ini sesuai dengan bajet dan lokasi anda.';
               } else if (lang === 'chinese') {
-                recommendationReasoning = '根据您选的型号我找到了匹配，但价格略超预算。';
+                recommendationReasoning = priceyIntro || '根据您选的型号我找到了匹配，但价格略超预算。';
                 alternativeReasoning = '下面这款在您预算内且您所在地区有货。';
               } else {
-                recommendationReasoning = 'Based on your preferred model I found a match — it\'s a bit above your budget.';
+                recommendationReasoning = priceyIntro || 'Based on your preferred model I found a match — it\'s a bit above your budget.';
                 alternativeReasoning = 'The option below fits your budget and is available in your area.';
               }
             }
