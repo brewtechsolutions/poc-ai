@@ -223,7 +223,8 @@ class SearchAgent {
       if (modelMatches.length > 0) {
         const modelIds = new Set(modelMatches.map(p => p.id));
         const inBudgetAndArea = afterArea.filter(p => modelIds.has(p.id));
-        finalProducts = [...inBudgetAndArea, ...modelMatches.filter(p => !inBudgetAndArea.find(m => m.id === p.id))];
+        const inBudgetAndAreaIds = new Set(inBudgetAndArea.map(p => p.id));
+        finalProducts = [...inBudgetAndArea, ...modelMatches.filter(p => !inBudgetAndAreaIds.has(p.id))];
 
         const modelIsPricey = budgetNum != null && inBudgetAndArea.length === 0;
         if (modelIsPricey) {
