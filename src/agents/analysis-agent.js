@@ -131,6 +131,107 @@ function parseStructuredBudgetAreaModel(message, context = {}) {
  * AnalysisAgent - main class.
  */
 class AnalysisAgent {
+  static getIntentEnum() {
+    return [
+      'greeting',
+      'bike_recommendation',
+      'more_options',
+      'model_selection',
+      'more_details',
+      'price_inquiry',
+      'budget_question',
+      'area_question',
+      'model_question',
+      'specification_question',
+      'test_ride_request',
+      'test_ride_booking',
+      'financing_question',
+      'trade_in_question',
+      'agent_request',
+      'goodbye',
+      'out_of_scope',
+    ];
+  }
+
+  static getToolDefinition() {
+    const intentEnum = this.getIntentEnum();
+    return [
+      {
+        type: 'function',
+        function: {
+          name: 'classify_message',
+          description:
+            'Classify the user message into an intent and extract motorcycle-sales entities for routing.',
+          parameters: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              intent: { type: 'string', enum: intentEnum },
+              entities: {
+                type: 'object',
+                additionalProperties: true,
+                properties: {
+                  budget: { type: 'string' },
+                  area: { type: 'string' },
+                  location: { type: 'string' },
+                  model: { type: 'string' },
+                  brand: { type: 'string' },
+                  selected_index: { type: 'integer' },
+                },
+              },
+              language: { type: 'string', enum: ['english', 'malay', 'chinese'] },
+              confidence: { type: 'number', minimum: 0, maximum: 1 },
+              suggestedQuestion: { type: ['string', 'null'] },
+              missingInfo: {
+                type: 'array',
+                items: { type: 'string', enum: ['budget', 'area', 'model'] },
+              },
+              hasAskedBudget: { type: 'boolean' },
+              hasAskedArea: { type: 'boolean' },
+              hasAskedModel: { type: 'boolean' },
+              salesInsight: { type: ['string', 'null'] },
+              skipAlreadyShownIds: { type: 'array', items: { type: 'string' } },
+            },
+            required: [
+              'intent',
+              'entities',
+              'language',
+              'confidence',
+              'suggestedQuestion',
+              'missingInfo',
+              'hasAskedBudget',
+              'hasAskedArea',
+              'hasAskedModel',
+              'salesInsight',
+              'skipAlreadyShownIds',
+            ],
+          },
+        },
+      },
+    ];
+  }
+
+  static normalizePlanFromModel(raw, context, tokensUsed, source) {
+    const intentEnum = new Set(this.getIntentEnum());
+    const safeIntent = intentEnum.has(raw?.intent) ? raw.intent : 'bike_recommendation';
+    const entities = raw?.entities && typeof raw.entities === 'object' ? raw.entities : {};
+    return {
+      intent: safeIntent,
+      entities,
+      language: raw?.language || context.language || 'english',
+      confidence: typeof raw?.confidence === 'number' ? raw.confidence : 0.7,
+      suggestedQuestion: raw?.suggestedQuestion ?? null,
+      missingInfo: Array.isArray(raw?.missingInfo) ? raw.missingInfo : [],
+      hasAskedBudget: !!raw?.hasAskedBudget,
+      hasAskedArea: !!raw?.hasAskedArea,
+      hasAskedModel: !!raw?.hasAskedModel,
+      salesInsight: raw?.salesInsight ?? null,
+      skipAlreadyShownIds: Array.isArray(raw?.skipAlreadyShownIds) ? raw.skipAlreadyShownIds : (context.skipAlreadyShownIds || []),
+      source,
+      tokensUsed: tokensUsed ?? 0,
+    };
+  }
+
   /**
    * Rule-based fast path: zero tokens, handles obvious intents.
    * @param {object} context - { user_message, conversationHistory, lastIntent, entities, lastShownProducts, language, hasAskedBudget, hasAskedArea, hasAskedModel }
@@ -140,14 +241,6 @@ class AnalysisAgent {
     const message = (context.user_message || '').trim();
     const lower = message.toLowerCase();
     const trimmed = message.trim();
-    const history = Array.isArray(context.conversationHistory) ? context.conversationHistory : [];
-    let lastBotMessage = null;
-    for (let i = history.length - 1; i >= 0; i--) {
-      if (history[i]?.role === 'assistant' && typeof history[i].content === 'string') {
-        lastBotMessage = history[i].content;
-        break;
-      }
-    }
 
     // Greeting
     if (/^(hi|hello|hey|halo|hai|你好|您好|嗨)$/i.test(trimmed) || /good morning|good afternoon|good evening/i.test(lower)) {
@@ -209,27 +302,6 @@ class AnalysisAgent {
       };
     }
 
-    // More options
-    if (/got others?|any others?|more options?|show more|ada lain|还有别的|其他(的)?(选择|推荐)?/i.test(lower) || /show (me )?all (the )?(bikes?|models?)/i.test(lower)) {
-      const existingIds = (context.lastShownProducts || []).map(p => p.id).filter(Boolean);
-      if (DEBUG) console.log('[AnalysisAgent] fastPath: more_options, skipAlreadyShownIds=', existingIds.length);
-      return {
-        intent: 'more_options',
-        entities: context.entities || context.metadata?.entities || {},
-        language: context.language || 'english',
-        confidence: 0.9,
-        suggestedQuestion: null,
-        missingInfo: [],
-        hasAskedBudget: context.hasAskedBudget || false,
-        hasAskedArea: context.hasAskedArea || false,
-        hasAskedModel: context.hasAskedModel || false,
-        salesInsight: null,
-        skipAlreadyShownIds: existingIds,
-        source: 'fast_path',
-        tokensUsed: 0,
-      };
-    }
-
     // Model selection by number (1, 2, 3) from last shown products
     const lastShown = context.lastShownProducts || context.metadata?.lastShownProducts;
     if (lastShown?.length && /^[1-9]\d*\.?$/.test(trimmed)) {
@@ -254,214 +326,6 @@ class AnalysisAgent {
       }
     }
 
-    // Financing
-    if (/installment|loan|bulkakan|boleh installment|pay monthly|hire purchase|分期|贷款/i.test(lower)) {
-      if (DEBUG) console.log('[AnalysisAgent] fastPath: financing_question');
-      return {
-        intent: 'financing_question',
-        entities: context.entities || {},
-        language: context.language || 'english',
-        confidence: 0.9,
-        suggestedQuestion: null,
-        missingInfo: [],
-        hasAskedBudget: context.hasAskedBudget || false,
-        hasAskedArea: context.hasAskedArea || false,
-        hasAskedModel: context.hasAskedModel || false,
-        salesInsight: null,
-        skipAlreadyShownIds: [],
-        source: 'fast_path',
-        tokensUsed: 0,
-      };
-    }
-
-    // Trade-in
-    if (/trade\s*in|tukar lama|old bike|nak trade in|exchange|tradein|trade-in|以旧换新/i.test(lower)) {
-      if (DEBUG) console.log('[AnalysisAgent] fastPath: trade_in_question');
-      return {
-        intent: 'trade_in_question',
-        entities: context.entities || {},
-        language: context.language || 'english',
-        confidence: 0.9,
-        suggestedQuestion: null,
-        missingInfo: [],
-        hasAskedBudget: context.hasAskedBudget || false,
-        hasAskedArea: context.hasAskedArea || false,
-        hasAskedModel: context.hasAskedModel || false,
-        salesInsight: null,
-        skipAlreadyShownIds: [],
-        source: 'fast_path',
-        tokensUsed: 0,
-      };
-    }
-
-    // Test ride
-    if (/test ride|ujian memandu|预约试驾|试驾|book (a )?test ride/i.test(lower)) {
-      if (DEBUG) console.log('[AnalysisAgent] fastPath: test_ride_request');
-      return {
-        intent: 'test_ride_request',
-        entities: context.entities || {},
-        language: context.language || 'english',
-        confidence: 0.9,
-        suggestedQuestion: null,
-        missingInfo: [],
-        hasAskedBudget: context.hasAskedBudget || false,
-        hasAskedArea: context.hasAskedArea || false,
-        hasAskedModel: context.hasAskedModel || false,
-        salesInsight: null,
-        skipAlreadyShownIds: [],
-        source: 'fast_path',
-        tokensUsed: 0,
-      };
-    }
-
-    // More details
-    if (/more detail|tell me more|full specs?|详细|maklumat lanjut/i.test(lower) && trimmed.length < 60) {
-      if (DEBUG) console.log('[AnalysisAgent] fastPath: more_details');
-      return {
-        intent: 'more_details',
-        entities: context.entities || {},
-        language: context.language || 'english',
-        confidence: 0.9,
-        suggestedQuestion: null,
-        missingInfo: [],
-        hasAskedBudget: context.hasAskedBudget || false,
-        hasAskedArea: context.hasAskedArea || false,
-        hasAskedModel: context.hasAskedModel || false,
-        salesInsight: null,
-        skipAlreadyShownIds: [],
-        source: 'fast_path',
-        tokensUsed: 0,
-      };
-    }
-
-    // Structured "RM 5,000, Puchong, Yamaha Ego"
-    const structured = parseStructuredBudgetAreaModel(message, context);
-    if (structured) {
-      if (DEBUG) console.log('[AnalysisAgent] fastPath: bike_recommendation (structured)');
-      return {
-        ...structured,
-        suggestedQuestion: null,
-        missingInfo: [],
-        hasAskedBudget: context.hasAskedBudget || false,
-        hasAskedArea: context.hasAskedArea || false,
-        hasAskedModel: context.hasAskedModel || false,
-        salesInsight: null,
-        skipAlreadyShownIds: [],
-        source: 'fast_path',
-        tokensUsed: 0,
-      };
-    }
-
-    // Brand-only (e.g. "i want suzuki", "ada honda?", "any yamaha?")
-    const brandOnlyMatch = lower.match(/\b(honda|yamaha|modenas|suzuki|kawasaki|ktm|benelli|demak)\b/i);
-    const hasBudgetAlready = /\b(rm|myr)\s*\d|budget|bajet|预算/i.test(lower);
-    if (brandOnlyMatch && !hasBudgetAlready) {
-      if (DEBUG) console.log('[AnalysisAgent] fastPath: bike_recommendation (brand only)');
-      return {
-        intent: 'bike_recommendation',
-        entities: {
-          ...(context.entities || {}),
-          brand: brandOnlyMatch[1],
-          budget: '',
-          area: '',
-          location: '',
-          model: '',
-        },
-        language: context.language || 'english',
-        confidence: 0.9,
-        suggestedQuestion: null,
-        missingInfo: [],
-        hasAskedBudget: context.hasAskedBudget || false,
-        hasAskedArea: context.hasAskedArea || false,
-        hasAskedModel: context.hasAskedModel || false,
-        salesInsight: null,
-        skipAlreadyShownIds: [],
-        source: 'fast_path',
-        tokensUsed: 0,
-      };
-    }
-
-    // Location-only (e.g. "i live at Puchong", "i'm in KL", "area Shah Alam")
-    const locationMatch = lower.match(
-      /(?:live at|stay at|live in|stay in|from|area|located at|i(?:'m| am) (?:at|in))\s+([a-zA-Z\s]+?)(?:\s*$|,|\.|!|\?)/i
-    ) || lower.match(
-      /\b(puchong|petaling jaya|pj|kl|kuala lumpur|shah alam|subang|klang|rawang|cheras|ampang|setapak|kepong|wangsa maju|johor bahru|jb|penang|ipoh|seremban|melaka|kota kinabalu|kk|kuching|miri|sibu)\b/i
-    );
-
-    const hasBudgetOrBrand = /\b(rm|myr)\s*\d|budget|bajet|\b(honda|yamaha|modenas|suzuki|kawasaki)\b/i.test(lower);
-
-    if (locationMatch && !hasBudgetOrBrand) {
-      const area = (locationMatch[1] || locationMatch[0]).trim();
-      if (DEBUG) console.log('[AnalysisAgent] fastPath: location_only', area);
-      return {
-        intent: 'bike_recommendation',
-        entities: { 
-          area: area, 
-          location: area, 
-          budget: context.entities?.budget || '',
-          brand: context.entities?.brand || '',
-          model: context.entities?.model || '',
-        },
-        language: context.language || 'english',
-        confidence: 0.9,
-        suggestedQuestion: null,
-        missingInfo: [],
-        hasAskedBudget: context.hasAskedBudget || false,
-        hasAskedArea: context.hasAskedArea || false,
-        hasAskedModel: context.hasAskedModel || false,
-        salesInsight: null,
-        skipAlreadyShownIds: [],
-        source: 'fast_path',
-        tokensUsed: 0,
-      };
-    }
-
-    // Budget-only (more robust patterns)
-    const budgetPatterns = [
-      /\b(?:rm|myr)\s*([\d,]+)/i, // "RM5000", "MYR 5,000"
-      /budget[^0-9]*([\d,]+)/i, // "budget of 5000", "my budget is 5000"
-      /(?:have|got|only|around|about)[^0-9]*([\d,]+)\s*(?:rm|myr|ringgit)?/i, // "i have 5000", "around 6000"
-      /([\d,]+)\s*(?:rm|myr|ringgit)/i, // "5000rm", "6000 ringgit"
-    ];
-
-    let budgetValue = null;
-    for (const pattern of budgetPatterns) {
-      const m = message.match(pattern);
-      if (m) {
-        const val = (m[1] || '').replace(/,/g, '');
-        if (val && parseInt(val, 10) > 100) {
-          budgetValue = val;
-          break;
-        }
-      }
-    }
-
-    if (budgetValue) {
-      if (DEBUG) console.log('[AnalysisAgent] fastPath: bike_recommendation (budget only)', budgetValue);
-      return {
-        intent: 'bike_recommendation',
-        entities: {
-          ...(context.entities || {}),
-          budget: budgetValue,
-          area: '',
-          location: '',
-          model: '',
-          brand: '',
-        },
-        language: context.language || 'english',
-        confidence: 0.9,
-        suggestedQuestion: null,
-        missingInfo: [],
-        hasAskedBudget: context.hasAskedBudget || false,
-        hasAskedArea: context.hasAskedArea || false,
-        hasAskedModel: context.hasAskedModel || false,
-        salesInsight: null,
-        skipAlreadyShownIds: [],
-        source: 'fast_path',
-        tokensUsed: 0,
-      };
-    }
-
     return null;
   }
 
@@ -474,23 +338,16 @@ class AnalysisAgent {
       .filter(Boolean);
     const skillBlocks = skills.map(s => s.prompt).join('\n');
     const lang = context.language || 'english';
-    return `You are a motorcycle sales assistant for MotorShop Malaysia. Analyze the user message and conversation context. Use the skills below to classify intent and extract entities. Respond ONLY with valid JSON.
+    return `You are a WhatsApp motorcycle sales assistant for a Malaysian motorcycle shop.
+
+Scope rules:
+- You ONLY sell motorcycles and motorcycle-related services.
+- If the user asks about anything outside motorcycles (cars, laptops/phones, other unrelated products), set intent to out_of_scope.
+- If the user mentions a motorcycle brand but the thing they're asking about is clearly not a motorcycle (e.g. a car model), that is also out_of_scope.
+
+Use the skills below to classify the message and extract entities for routing. Always call the tool classify_message and fill its schema accurately.
 
 ${skillBlocks}
-
-## Output format (strict JSON)
-Return exactly: {
-  "intent": "<one of: greeting, bike_recommendation, more_options, model_selection, more_details, price_inquiry, budget_question, area_question, model_question, specification_question, test_ride_request, test_ride_booking, financing_question, trade_in_question, agent_request, goodbye>",
-  "entities": { "budget": "", "area": "", "location": "", "model": "", "brand": "" },
-  "language": "english|malay|chinese",
-  "confidence": 0.0-1.0,
-  "suggestedQuestion": "one short follow-up question in user language if missing_info is non-empty, else null",
-  "missingInfo": ["budget"|"area"|"model"],
-  "hasAskedBudget": boolean,
-  "hasAskedArea": boolean,
-  "hasAskedModel": boolean,
-  "salesInsight": null or one short sentence
-}
 
 Conversation language: ${lang}. Last intent: ${context.lastIntent || 'none'}. Existing entities: ${JSON.stringify(context.entities || {})}.`;
   }
@@ -518,37 +375,45 @@ Conversation language: ${lang}. Last intent: ${context.lastIntent || 'none'}. Ex
     ].filter(m => m.content);
 
     try {
-      if (DEBUG) console.log('[AnalysisAgent] LLM fallback for:', (context.user_message || '').substring(0, 50));
-      const completion = await openai.chat.completions.create({
+      if (DEBUG) console.log('[AnalysisAgent] LLM analyze for:', (context.user_message || '').substring(0, 50));
+
+      // Primary path: tool-call structured output
+      const toolCompletion = await openai.chat.completions.create({
+        model: options.model || 'gpt-4o-mini',
+        messages,
+        temperature: options.temperature ?? TOKEN_CONFIG.TEMPERATURE.STRICT,
+        max_tokens: options.max_tokens || 250,
+        tools: this.getToolDefinition(),
+        tool_choice: { type: 'function', function: { name: 'classify_message' } },
+      });
+
+      const tokensUsed = toolCompletion.usage?.total_tokens || 0;
+      const toolCall = toolCompletion.choices?.[0]?.message?.tool_calls?.[0];
+      const args = toolCall?.function?.arguments;
+      if (toolCall?.function?.name === 'classify_message' && typeof args === 'string' && args.trim()) {
+        const raw = JSON.parse(args);
+        const plan = this.normalizePlanFromModel(raw, context, tokensUsed, 'llm');
+        if (DEBUG) console.log('[AnalysisAgent] Tool intent:', plan.intent);
+        return plan;
+      }
+
+      // Safety net: force json_object response_format if tool-call output is missing/malformed
+      const jsonCompletion = await openai.chat.completions.create({
         model: options.model || 'gpt-4o-mini',
         messages,
         temperature: options.temperature ?? TOKEN_CONFIG.TEMPERATURE.STRICT,
         max_tokens: options.max_tokens || 250,
         response_format: { type: 'json_object' },
       });
-      const content = JSON.parse(completion.choices[0].message.content || '{}');
-      const tokensUsed = completion.usage?.total_tokens || 0;
-      const plan = {
-        intent: content.intent || 'general_question',
-        entities: content.entities || {},
-        language: content.language || context.language || 'english',
-        confidence: typeof content.confidence === 'number' ? content.confidence : 0.7,
-        suggestedQuestion: content.suggestedQuestion || null,
-        missingInfo: Array.isArray(content.missingInfo) ? content.missingInfo : [],
-        hasAskedBudget: !!content.hasAskedBudget,
-        hasAskedArea: !!content.hasAskedArea,
-        hasAskedModel: !!content.hasAskedModel,
-        salesInsight: content.salesInsight || null,
-        skipAlreadyShownIds: context.skipAlreadyShownIds || [],
-        source: 'llm',
-        tokensUsed,
-      };
-      if (DEBUG) console.log('[AnalysisAgent] LLM intent:', plan.intent);
+      const jsonTokensUsed = jsonCompletion.usage?.total_tokens || 0;
+      const content = JSON.parse(jsonCompletion.choices[0].message.content || '{}');
+      const plan = this.normalizePlanFromModel(content, context, jsonTokensUsed, 'llm');
+      if (DEBUG) console.log('[AnalysisAgent] JSON intent:', plan.intent);
       return plan;
     } catch (err) {
       console.error('[AnalysisAgent] LLM error:', err.message);
       return {
-        intent: 'general_question',
+        intent: 'bike_recommendation',
         entities: {},
         language: context.language || 'english',
         confidence: 0.3,

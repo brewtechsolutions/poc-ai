@@ -100,7 +100,11 @@
             { "intent": "trade_in_question", "next": "trade_in_handler" },
             { "intent": "agent_request", "next": "agent_escalation" },
             { "intent": "complaint", "next": "agent_escalation" },
-            { "intent": "goodbye", "next": "goodbye_handler" }
+            { "intent": "goodbye", "next": "goodbye_handler" },
+            {
+              "intent": "out_of_scope",
+              "next": "out_of_scope_handler"
+            }
           ],
           "fallback": "clarification_handler"
         }
@@ -639,12 +643,21 @@
         }
       },
       {
+        "id": "out_of_scope_handler",
+        "type": "handler",
+        "name": "Out of Scope Handler",
+        "config": {
+          "template": "out_of_scope",
+          "next": "response_optimizer"
+        }
+      },
+      {
         "id": "response_optimizer",
         "type": "optimizer",
         "name": "Response Token Optimizer",
         "config": {
           "model": "gpt-4o-mini",
-          "temperature": 0.2,
+          "temperature": 0.55,
           "max_tokens": 600,
           "optimize_for": "whatsapp",
           "remove_redundancy": true,
@@ -690,6 +703,11 @@
         "english": "Hey there! 👋\n\nJust let me know which language you’re more comfortable with, ya?\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\nYou can just reply with 1, 2, or 3.",
         "malay": "Hai! 👋\n\nBeritahu saya bahasa mana yang anda lebih selesa guna ya?\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\nAnda boleh balas dengan 1, 2, atau 3 sahaja.",
         "chinese": "嗨～👋\n\n跟我说你比较习惯用哪一种语言：\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\n直接回复 1、2 或 3 就可以了。"
+      },
+      "out_of_scope": {
+        "english": "Hmm, that sounds like a car! 😄 We only sell motorcycles here. Were you maybe looking for a bike instead? I can help you find one that suits your budget and area!",
+        "malay": "Hmm, tu macam kereta! 😄 Kami jual motosikal sahaja. Adakah anda mencari motor? Saya boleh bantu cari yang sesuai dengan bajet dan kawasan anda!",
+        "chinese": "哈，那是汽车哦！😄 我们只卖摩托车。您是不是想找摩托车？告诉我您的预算和地区，我来帮您推荐！"
       },
       "greeting": {
         "english": "Hello! 👋 Welcome to MotorShop! I'm your AI motorcycle assistant. I can help you find the perfect bike based on your budget, location, and preferences.\n\nTo get started, please reply with:\n1. Budget (RM) – e.g. RM 5,000 – RM 8,000\n2. Area / Location – e.g. Puchong, PJ, KL\n3. Preferred model / brand (optional) – e.g. Yamaha Ego S, Honda\n\nAnswer in one line, for example: RM 5,000, Puchong, Yamaha Ego S",
