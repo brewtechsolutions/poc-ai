@@ -530,7 +530,7 @@ class WorkflowEngine {
 
   /**
    * AnalysisRouter: slot-based routing that works for any product domain.
-   * Routes based on filled/missing slots (budget, area, model, brand) rather than hardcoded intents.
+   * Priority: Intent-based routing (from workflow.json) → Slot-based routing (only for recommendation intents) → Default routing
    * Generic and profile-agnostic - reads search node ID from workflow config.
    */
   handleAnalysisRouter(node, context) {
@@ -555,16 +555,32 @@ class WorkflowEngine {
     const hasArea = !!(turnEntities.area || turnEntities.location);
     const hasProductType = !!(turnEntities.product_type || turnEntities.category);
 
-    // Slot-based routing logic (generic, not domain-specific)
+    // Check intent type
     const isRecommendationIntent = recommendationIntents.includes(intent);
     const isAreaQuestionIntent = areaQuestionIntents.includes(intent);
 
-    // 0) Area-only: user gave area/location → extract and search
-    if ((isAreaQuestionIntent || isRecommendationIntent) && hasArea && !hasBudget && !hasModel && !hasBrand) {
+    // PRIORITY 1: Respect intent-based routing from workflow.json first
+    // If LanguageAgent.handleRouter already found a route (result.next exists), use it
+    // UNLESS it's a recommendation intent that needs slot-based enhancement
+    if (result.next && !isRecommendationIntent) {
+      // For non-recommendation intents (like area_question, budget_question, etc.),
+      // respect the workflow.json route (e.g. area_question → area_handler)
+      if (process.env.DEBUG === 'true') {
+        console.log(`   [AnalysisRouter] Using intent-based route: ${intent} → ${result.next}`);
+      }
+      return result;
+    }
+
+    // PRIORITY 2: Slot-based routing ONLY for recommendation/search intents
+    // This enhances recommendation intents based on what slots are filled
+    
+    // 0) Area-only with recommendation intent: user gave area/location → search with area context
+    // BUT: Only if intent is actually a recommendation/search intent, not area_question
+    if (isRecommendationIntent && hasArea && !hasBudget && !hasModel && !hasBrand) {
       // Merge area entity into context for search
       context.entities = { ...(context.entities || {}), ...turnEntities };
       if (process.env.DEBUG === 'true') {
-        console.log(`   [AnalysisRouter] Area-only query → ${searchNodeId} with area context`, turnEntities);
+        console.log(`   [AnalysisRouter] Area-only recommendation → ${searchNodeId} with area context`, turnEntities);
       }
       return {
         ...result,
@@ -601,7 +617,8 @@ class WorkflowEngine {
       return { ...result, next: searchNodeId };
     }
 
-    // 3) Fall back to default routing from workflow.json
+    // PRIORITY 3: Fall back to default routing from workflow.json
+    // This handles cases where LanguageAgent.handleRouter found a route but we didn't override it
     return result;
   }
 
