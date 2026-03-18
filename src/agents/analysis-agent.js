@@ -5,6 +5,7 @@
  */
 
 import openai, { TOKEN_CONFIG } from '../config/openai.js';
+import { AI_ROLES, getRoleConfig } from '../config/ai-registry.js';
 
 /** Skill definitions: name, label, description, and prompt fragment for system prompt composition */
 export const SKILLS = {
@@ -33,7 +34,9 @@ export const SKILLS = {
     description: 'Understands Malaysian locations and area-based availability.',
     prompt: `
 ## Skill: Local Market Expert
-- Extract area/location from "Puchong", "KL", "JB", "Penang", "Kota Kinabalu", "我住Puchong", "area Shah Alam".
+- Extract area/location from ANY location name mentioned: "Puchong", "KL", "JB", "Penang", "Kota Kinabalu", "Shah Alam", "Indonesia", "Singapore", "Jakarta", "我住Puchong", "area Shah Alam", etc.
+- If the user just says a location name (e.g.  "puchong", "KL"), extract it as entities.area and entities.location.
+- Even if the intent is area_question, if a location is mentioned, extract it as an entity so we can search with that area context.
 - Set entities.area and entities.location. Use for availability and "in your area" recommendations.`,
   },
   context_memory: {
@@ -95,7 +98,7 @@ export const DEFAULT_SKILLS = [
 const DEBUG = process.env.DEBUG === 'true';
 
 /**
- * Parse "RM 5,000, Puchong, Yamaha Ego" style message into intent and entities.
+ * Parse "RM 5,000, Area, Preferred Model" style message into intent and entities.
  */
 function parseStructuredBudgetAreaModel(message, context = {}) {
   const raw = String(message).trim();
@@ -131,10 +134,17 @@ function parseStructuredBudgetAreaModel(message, context = {}) {
  * AnalysisAgent - main class.
  */
 class AnalysisAgent {
-  static getIntentEnum() {
+  /**
+   * Get intent enum from config (workflow.json) or fallback to defaults
+   */
+  static getIntentEnum(config = {}) {
+    if (config.intents && Array.isArray(config.intents)) {
+      return config.intents;
+    }
+    // Fallback defaults (for backward compatibility)
     return [
       'greeting',
-      'bike_recommendation',
+      'product_recommendation',
       'more_options',
       'model_selection',
       'more_details',
@@ -153,15 +163,49 @@ class AnalysisAgent {
     ];
   }
 
-  static getToolDefinition() {
-    const intentEnum = this.getIntentEnum();
+  /**
+   * Get entity schema from config or fallback to defaults
+   */
+  static getEntitySchema(config = {}) {
+    if (config.entities && Array.isArray(config.entities)) {
+      return config.entities;
+    }
+    // Fallback defaults
+    return ['budget', 'area', 'location', 'model', 'brand', 'selected_index'];
+  }
+
+  /**
+   * Get missing slots from config or fallback to defaults
+   */
+  static getMissingSlots(config = {}) {
+    if (config.missing_slots && Array.isArray(config.missing_slots)) {
+      return config.missing_slots;
+    }
+    // Fallback defaults
+    return ['budget', 'area', 'model'];
+  }
+
+  static getToolDefinition(config = {}) {
+    const intentEnum = this.getIntentEnum(config);
+    const entitySchema = this.getEntitySchema(config);
+    const missingSlots = this.getMissingSlots(config);
+    
+    // Build entity properties dynamically
+    const entityProperties = {};
+    entitySchema.forEach(entity => {
+      if (entity === 'selected_index') {
+        entityProperties[entity] = { type: 'integer' };
+      } else {
+        entityProperties[entity] = { type: 'string' };
+      }
+    });
     return [
       {
         type: 'function',
         function: {
           name: 'classify_message',
           description:
-            'Classify the user message into an intent and extract motorcycle-sales entities for routing.',
+            'Classify the user message into an intent and extract product-sales entities for routing.',
           parameters: {
             type: 'object',
             additionalProperties: false,
@@ -170,21 +214,14 @@ class AnalysisAgent {
               entities: {
                 type: 'object',
                 additionalProperties: true,
-                properties: {
-                  budget: { type: 'string' },
-                  area: { type: 'string' },
-                  location: { type: 'string' },
-                  model: { type: 'string' },
-                  brand: { type: 'string' },
-                  selected_index: { type: 'integer' },
-                },
+                properties: entityProperties,
               },
               language: { type: 'string', enum: ['english', 'malay', 'chinese'] },
               confidence: { type: 'number', minimum: 0, maximum: 1 },
               suggestedQuestion: { type: ['string', 'null'] },
               missingInfo: {
                 type: 'array',
-                items: { type: 'string', enum: ['budget', 'area', 'model'] },
+                items: { type: 'string', enum: missingSlots },
               },
               hasAskedBudget: { type: 'boolean' },
               hasAskedArea: { type: 'boolean' },
@@ -211,9 +248,11 @@ class AnalysisAgent {
     ];
   }
 
-  static normalizePlanFromModel(raw, context, tokensUsed, source) {
-    const intentEnum = new Set(this.getIntentEnum());
-    const safeIntent = intentEnum.has(raw?.intent) ? raw.intent : 'bike_recommendation';
+  static normalizePlanFromModel(raw, context, tokensUsed, source, config = {}) {
+    const intentEnum = new Set(this.getIntentEnum(config));
+    // Use first product-related intent as fallback
+    const fallbackIntent = config.intents?.find(i => i.includes('recommendation') || i.includes('inquiry')) || 'product_recommendation';
+    const safeIntent = intentEnum.has(raw?.intent) ? raw.intent : fallbackIntent;
     const entities = raw?.entities && typeof raw.entities === 'object' ? raw.entities : {};
     return {
       intent: safeIntent,
@@ -330,22 +369,21 @@ class AnalysisAgent {
   }
 
   /**
-   * Build system prompt from active skills and context.
+   * Build system prompt from config, active skills, and context.
+   * If config.system_prompt is provided, use it; otherwise build from skills.
    */
-  static buildSystemPrompt(activeSkillNames, context) {
+  static buildSystemPrompt(activeSkillNames, context, config = {}) {
     const skills = activeSkillNames
       .map(name => SKILLS[name])
       .filter(Boolean);
     const skillBlocks = skills.map(s => s.prompt).join('\n');
     const lang = context.language || 'english';
-    return `You are a WhatsApp motorcycle sales assistant for a Malaysian motorcycle shop.
-
-Scope rules:
-- You ONLY sell motorcycles and motorcycle-related services.
-- If the user asks about anything outside motorcycles (cars, laptops/phones, other unrelated products), set intent to out_of_scope.
-- If the user mentions a motorcycle brand but the thing they're asking about is clearly not a motorcycle (e.g. a car model), that is also out_of_scope.
-
-Use the skills below to classify the message and extract entities for routing. Always call the tool classify_message and fill its schema accurately.
+    
+    // Use system prompt from config if provided, otherwise build from skills
+    const basePrompt = config.system_prompt || 
+      `You are a WhatsApp sales assistant. Use the skills below to classify messages and extract entities for routing. Always call the tool classify_message and fill its schema accurately.`;
+    
+    return `${basePrompt}
 
 ${skillBlocks}
 
@@ -360,10 +398,11 @@ Conversation language: ${lang}. Last intent: ${context.lastIntent || 'none'}. Ex
    */
   static async analyze(context, options = {}) {
     const activeSkills = options.activeSkills || DEFAULT_SKILLS;
+    const config = options.config || {}; // Config from workflow.json node.config
     const fast = this.fastPath(context);
     if (fast) return fast;
 
-    const systemPrompt = this.buildSystemPrompt(activeSkills, context);
+    const systemPrompt = this.buildSystemPrompt(activeSkills, context, config);
     const history = (context.conversationHistory || []).slice(-6);
     const messages = [
       { role: 'system', content: systemPrompt },
@@ -377,13 +416,19 @@ Conversation language: ${lang}. Last intent: ${context.lastIntent || 'none'}. Ex
     try {
       if (DEBUG) console.log('[AnalysisAgent] LLM analyze for:', (context.user_message || '').substring(0, 50));
 
+      // Get config from registry (can be overridden by options)
+      const roleConfig = getRoleConfig(AI_ROLES.ANALYZER);
+      const model = options.model || config.model || roleConfig.model;
+      const temperature = options.temperature ?? config.temperature ?? roleConfig.temperature;
+      const maxTokens = options.max_tokens || config.max_tokens || roleConfig.maxTokens;
+
       // Primary path: tool-call structured output
       const toolCompletion = await openai.chat.completions.create({
-        model: options.model || 'gpt-4o-mini',
+        model,
         messages,
-        temperature: options.temperature ?? TOKEN_CONFIG.TEMPERATURE.STRICT,
-        max_tokens: options.max_tokens || 250,
-        tools: this.getToolDefinition(),
+        temperature,
+        max_tokens: maxTokens,
+        tools: this.getToolDefinition(config),
         tool_choice: { type: 'function', function: { name: 'classify_message' } },
       });
 
@@ -392,28 +437,29 @@ Conversation language: ${lang}. Last intent: ${context.lastIntent || 'none'}. Ex
       const args = toolCall?.function?.arguments;
       if (toolCall?.function?.name === 'classify_message' && typeof args === 'string' && args.trim()) {
         const raw = JSON.parse(args);
-        const plan = this.normalizePlanFromModel(raw, context, tokensUsed, 'llm');
+        const plan = this.normalizePlanFromModel(raw, context, tokensUsed, 'llm', config);
         if (DEBUG) console.log('[AnalysisAgent] Tool intent:', plan.intent);
         return plan;
       }
 
       // Safety net: force json_object response_format if tool-call output is missing/malformed
       const jsonCompletion = await openai.chat.completions.create({
-        model: options.model || 'gpt-4o-mini',
+        model,
         messages,
-        temperature: options.temperature ?? TOKEN_CONFIG.TEMPERATURE.STRICT,
-        max_tokens: options.max_tokens || 250,
+        temperature,
+        max_tokens: maxTokens,
         response_format: { type: 'json_object' },
       });
       const jsonTokensUsed = jsonCompletion.usage?.total_tokens || 0;
       const content = JSON.parse(jsonCompletion.choices[0].message.content || '{}');
-      const plan = this.normalizePlanFromModel(content, context, jsonTokensUsed, 'llm');
+      const plan = this.normalizePlanFromModel(content, context, jsonTokensUsed, 'llm', config);
       if (DEBUG) console.log('[AnalysisAgent] JSON intent:', plan.intent);
       return plan;
     } catch (err) {
       console.error('[AnalysisAgent] LLM error:', err.message);
+      const fallbackIntent = config.intents?.find(i => i.includes('recommendation') || i.includes('inquiry')) || 'product_recommendation';
       return {
-        intent: 'bike_recommendation',
+        intent: fallbackIntent,
         entities: {},
         language: context.language || 'english',
         confidence: 0.3,

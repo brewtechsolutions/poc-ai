@@ -495,6 +495,7 @@ class WorkflowEngine {
       model: node.config?.model,
       temperature: node.config?.temperature,
       max_tokens: node.config?.max_tokens,
+      config: node.config, // Pass full config for intents/entities/system_prompt
     });
     const tokensUsed = plan.tokensUsed ?? 0;
     context.entities = { ...(context.entities || {}), ...(plan.entities || {}) };
@@ -528,32 +529,58 @@ class WorkflowEngine {
   }
 
   /**
-   * AnalysisRouter: route by intent from analysis plan.
-   * When user already gave a model/brand, go to bike_search first to check we have it.
-   * When user only gave budget (no model/brand) this turn, go to bike_search in budget_only mode.
+   * AnalysisRouter: slot-based routing that works for any product domain.
+   * Routes based on filled/missing slots (budget, area, model, brand) rather than hardcoded intents.
+   * Generic and profile-agnostic - reads search node ID from workflow config.
    */
   handleAnalysisRouter(node, context) {
     const result = LanguageAgent.handleRouter(node, context);
     const intent = result.data?.intent;
 
+    // Get search node ID from config (defaults to 'bike_search' for backward compatibility)
+    const searchNodeId = node.config?.search_node_id || 'bike_search';
+    const recommendationIntents = node.config?.recommendation_intents || ['product_recommendation', 'bike_recommendation'];
+    const areaQuestionIntents = node.config?.area_question_intents || ['area_question'];
+    
     // Prefer entities from this turn (from AnalysisAgent) over merged history
     const turnEntities =
       context.lastResult?.data?.entitiesForTurn ||
       result.data?.entities ||
       {};
 
-    const hasBudget =
-      !!(turnEntities.budget || turnEntities.price);
-    const hasBrand =
-      !!(turnEntities.brand && String(turnEntities.brand).trim());
-    const hasModel =
-      !!(turnEntities.model && String(turnEntities.model).trim());
+    // Generic slot detection (works for any domain)
+    const hasBudget = !!(turnEntities.budget || turnEntities.price || turnEntities.price_range);
+    const hasBrand = !!(turnEntities.brand && String(turnEntities.brand).trim());
+    const hasModel = !!(turnEntities.model && String(turnEntities.model).trim());
+    const hasArea = !!(turnEntities.area || turnEntities.location);
+    const hasProductType = !!(turnEntities.product_type || turnEntities.category);
 
-    // 1) Budget-only: user gave budget but NO model/brand in this turn.
-    if (intent === 'bike_recommendation' && hasBudget && !hasBrand && !hasModel) {
+    // Slot-based routing logic (generic, not domain-specific)
+    const isRecommendationIntent = recommendationIntents.includes(intent);
+    const isAreaQuestionIntent = areaQuestionIntents.includes(intent);
+
+    // 0) Area-only: user gave area/location → extract and search
+    if ((isAreaQuestionIntent || isRecommendationIntent) && hasArea && !hasBudget && !hasModel && !hasBrand) {
+      // Merge area entity into context for search
+      context.entities = { ...(context.entities || {}), ...turnEntities };
+      if (process.env.DEBUG === 'true') {
+        console.log(`   [AnalysisRouter] Area-only query → ${searchNodeId} with area context`, turnEntities);
+      }
+      return {
+        ...result,
+        data: {
+          ...result.data,
+          entities: context.entities,
+        },
+        next: searchNodeId,
+      };
+    }
+
+    // 1) Budget-only: user gave budget but NO model/brand in this turn → search with budget filter
+    if (isRecommendationIntent && hasBudget && !hasBrand && !hasModel) {
       context.searchType = 'budget_only';
       if (process.env.DEBUG === 'true') {
-        console.log('   [AnalysisRouter] Budget-only bike_recommendation → bike_search (budget_only)', turnEntities);
+        console.log(`   [AnalysisRouter] Budget-only ${intent} → ${searchNodeId} (budget_only)`, turnEntities);
       }
       return {
         ...result,
@@ -561,20 +588,20 @@ class WorkflowEngine {
           ...result.data,
           searchType: 'budget_only',
         },
-        next: 'bike_search',
+        next: searchNodeId,
       };
     }
 
-    // 2) Model/brand present in this turn → model/brand-first search
-    const hasModelOrBrand = hasBrand || hasModel;
-    if (intent === 'bike_recommendation' && hasModelOrBrand) {
+    // 2) Model/brand/product_type present in this turn → search with model/brand filter
+    const hasModelOrBrandOrType = hasBrand || hasModel || hasProductType;
+    if (isRecommendationIntent && hasModelOrBrandOrType) {
       if (process.env.DEBUG === 'true') {
-        console.log('   [AnalysisRouter] User gave model/brand this turn → bike_search first', turnEntities);
+        console.log(`   [AnalysisRouter] User gave model/brand/type this turn → ${searchNodeId} first`, turnEntities);
       }
-      return { ...result, next: 'bike_search' };
+      return { ...result, next: searchNodeId };
     }
 
-    // 3) Fall back to default routing
+    // 3) Fall back to default routing from workflow.json
     return result;
   }
 

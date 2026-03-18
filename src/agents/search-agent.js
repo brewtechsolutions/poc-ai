@@ -1,11 +1,14 @@
 import openai, { TOKEN_CONFIG } from '../config/openai.js';
+import { AI_ROLES, getRoleConfig } from '../config/ai-registry.js';
 import prisma from '../config/database.js';
 import ProductRecommender from '../utils/product-recommender.js';
 import { getMergedEntitiesFromContext } from '../utils/entities.js';
 import { productMatchesRequestedModel } from '../utils/products.js';
 
-/** Known brand names (lowercase) for extraction; can be replaced by DB lookup for full dynamic list */
-const KNOWN_BRANDS = ['yamaha', 'honda', 'kawasaki', 'suzuki', 'modenas', 'ktm', 'benelli'];
+/**
+ * Extract brand from user message (generic - works for any product domain).
+ * Brands are now looked up dynamically from the database, not hardcoded.
+ */
 
 /** Hard cap for "slightly over budget" (budget + 999). Adjust to fit inventory spread. */
 const BUDGET_OVER_CAP = 999;
@@ -44,14 +47,18 @@ function extractBudgetFromMessage(message) {
 }
 
 /**
- * Extract brand from user message (e.g. "有kawasaki吗" -> "kawasaki").
- * @returns {string|null} Normalized brand name (title case for display) or null
+ * Extract brand from user message (generic - works for any product domain).
+ * Uses database lookup to find matching brands dynamically.
+ * @returns {Promise<string|null>} Normalized brand name (title case for display) or null
  */
-function extractBrandFromMessage(message) {
+async function extractBrandFromMessage(message) {
   if (!message || typeof message !== 'string') return null;
   const lower = message.toLowerCase().trim();
-  const found = KNOWN_BRANDS.find(b => lower.includes(b));
-  return found ? found.charAt(0).toUpperCase() + found.slice(1) : null;
+  
+  // Get all available brands from database
+  const availableBrands = await getAvailableBrandsFromDb();
+  const found = availableBrands.find(b => lower.includes(b.toLowerCase()));
+  return found || null;
 }
 
 /**
@@ -68,9 +75,10 @@ async function getAvailableBrandsFromDb() {
 }
 
 /**
- * SearchAgent - handles product search, ranking and related ML nodes
+ * SearchAgent - Generic product search, ranking and related ML nodes
  * This keeps WorkflowEngine focused on orchestration while this module
- * encapsulates the multi-step "find and rank bikes" behaviour.
+ * encapsulates the multi-step "find and rank products" behavior.
+ * Works for any product domain (motorcycles, electronics, etc.)
  */
 class SearchAgent {
   static canHandle(node) {
@@ -78,6 +86,7 @@ class SearchAgent {
       'context_collector',
       'product_recommender',
       'bike_ranker',
+      'product_ranker',
       'no_results_handler',
     ].includes(node.id) || (
       node.type === 'database' && node.config?.operation === 'semantic_search'
@@ -103,12 +112,13 @@ class SearchAgent {
   }
 
   /**
-   * Database-level semantic product search (bike_search node).
-   * This is migrated from WorkflowEngine.semanticProductSearch.
+   * Generic product search - works for any product domain.
+   * Category and filters are driven by node.config, not hardcoded.
    */
   static async semanticProductSearch(node, context, lastResult) {
     const query = context.user_message || '';
     const entities = lastResult?.entities || context.entities || context.metadata?.entities || {};
+    // Get category from config (e.g. "Motorcycle" for MotorShop, "Electronics" for electronics shop)
     const category = node.config.category || entities.category || null;
     const isMoreOptions = context.lastIntent === 'more_options';
     const skipIds = context.skipAlreadyShownIds || [];
@@ -122,7 +132,7 @@ class SearchAgent {
     // Brand-availability check: if user asks for a specific brand only, query DB first.
     // Skip this in budget_only mode.
     if (!isBudgetOnly) {
-      const brandFromMessage = extractBrandFromMessage(query);
+      const brandFromMessage = await extractBrandFromMessage(query);
       const brandFromEntities = (entities.brand || '').toString().trim();
       const requestedBrandOnly = (brandFromMessage || brandFromEntities) && !(entities.model || '').toString().trim();
       const brandToCheck = (brandFromMessage || brandFromEntities || '').toLowerCase();
@@ -151,7 +161,7 @@ class SearchAgent {
         const availableBrands = await getAvailableBrandsFromDb();
         const displayBrand = brandFromMessage || (brandFromEntities || brandToCheck).charAt(0).toUpperCase() + brandToCheck.slice(1);
         if (process.env.DEBUG === 'true') {
-          console.log(`   [bike_search] Brand "${displayBrand}" not in inventory. Available: ${availableBrands.join(', ')}`);
+          console.log(`   [product_search] Brand "${displayBrand}" not in inventory. Available: ${availableBrands.join(', ')}`);
         }
         return {
           data: {
@@ -488,7 +498,7 @@ class SearchAgent {
       if (isMoreOptions) {
         const topN = node.config.top_n || 5;
         const moreProducts = products.slice(0, topN);
-        if (process.env.DEBUG === 'true') console.log(`   [bike_ranker] more_options: returning ${moreProducts.length} additional options (no model-first framing)`);
+        if (process.env.DEBUG === 'true') console.log(`   [${node.id}] more_options: returning ${moreProducts.length} additional options (no model-first framing)`);
         return {
           data: {
             products: moreProducts,
@@ -538,10 +548,14 @@ class SearchAgent {
               const budgetStr = entities.budget ? `RM ${entities.budget}` : 'your budget';
               const firstPrice = firstBike.price != null ? `MYR ${Number(firstBike.price).toLocaleString()}` : '';
               const secondBike = ordered[1];
-              const systemPrompt = 'You are a friendly motorcycle sales assistant. Return JSON with two short sentences in the user\'s language (English, Malay, or Chinese): model_reasoning = why the first bike is shown (they asked for this model but it may be a bit above budget). alternative_reasoning = why the second bike is recommended (e.g. fits their budget and is available in their area). Keep each 1 sentence, warm and helpful.';
-              const userPrompt = `User's budget: ${budgetStr}. Area: ${entities.area || 'any'}. They asked for: ${requestedModel}. First bike: ${firstBike.name} (${firstPrice}). Second bike: ${secondBike ? secondBike.name + ' (MYR ' + Number(secondBike.price).toLocaleString() + ')' : 'none'}. Language: ${lang}. Return JSON: { "model_reasoning": "...", "alternative_reasoning": "..." }`;
+              // Generic product reasoning prompt (works for any domain)
+              const productType = node.config.product_type_label || 'product';
+              const systemPrompt = `You are a friendly sales assistant. Return JSON with two short sentences in the user's language (English, Malay, or Chinese): model_reasoning = why the first ${productType} is shown (they asked for this model but it may be a bit above budget). alternative_reasoning = why the second ${productType} is recommended (e.g. fits their budget and is available in their area). Keep each 1 sentence, warm and helpful.`;
+              const userPrompt = `User's budget: ${budgetStr}. Area: ${entities.area || 'any'}. They asked for: ${requestedModel}. First ${productType}: ${firstBike.name} (${firstPrice}). Second ${productType}: ${secondBike ? secondBike.name + ' (MYR ' + Number(secondBike.price).toLocaleString() + ')' : 'none'}. Language: ${lang}. Return JSON: { "model_reasoning": "...", "alternative_reasoning": "..." }`;
+              // Get config from registry for ranking reasoning
+              const rankerConfig = getRoleConfig(AI_ROLES.RANKER);
               const completion = await openai.chat.completions.create({
-                model: node.config.model || 'gpt-4o-mini',
+                model: node.config.model || rankerConfig.model,
                 messages: [
                   { role: 'system', content: systemPrompt },
                   { role: 'user', content: userPrompt },
@@ -556,7 +570,7 @@ class SearchAgent {
               alternativeReasoning = (parsed.alternative_reasoning || '').trim();
               recommendationReasoning = priceyIntro ? (priceyIntro + (llmModelReasoning ? ' ' + llmModelReasoning : '')) : llmModelReasoning;
             } catch (err) {
-              if (process.env.DEBUG === 'true') console.log('   [bike_ranker] Reasoning fallback:', err.message);
+              if (process.env.DEBUG === 'true') console.log(`   [${node.id}] Reasoning fallback:`, err.message);
               if (lang === 'malay') {
                 recommendationReasoning = priceyIntro || 'Berdasarkan model pilihan anda, saya jumpa padanan — harganya sedikit melebihi bajet.';
                 alternativeReasoning = 'Pilihan ini sesuai dengan bajet dan lokasi anda.';
@@ -605,14 +619,20 @@ ${productsList}
 Rank products by relevance. Return JSON with: products (array with id/name, relevance_score, reasoning), overall_reasoning, confidence.`;
 
       try {
+        // Get config from registry (can be overridden by node.config)
+        const rankerConfig = getRoleConfig(AI_ROLES.RANKER);
+        const model = node.config.model || rankerConfig.model;
+        const temperature = node.config.temperature ?? rankerConfig.temperature;
+        const maxTokens = node.config.max_tokens || rankerConfig.maxTokens;
+
         const completion = await openai.chat.completions.create({
-          model: node.config.model || 'gpt-4o-mini',
+          model,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          temperature: node.config.temperature || 0.2,
-          max_tokens: node.config.max_tokens || 400,
+          temperature,
+          max_tokens: maxTokens,
           response_format: { type: 'json_object' },
         });
 
@@ -676,14 +696,20 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
           const searchInfo = lastResult.entities || context.metadata?.entities || {};
           userContent = `User's search had no results. They asked for: budget=${searchInfo.budget || 'any'}, area=${searchInfo.area || 'any'}, model=${searchInfo.model || 'any'}. User message: "${userContent}"`;
         }
+        // Get config from registry for generic ML nodes
+        const rankerConfig = getRoleConfig(AI_ROLES.RANKER);
+        const model = node.config.model || rankerConfig.model;
+        const temperature = node.config.temperature ?? rankerConfig.temperature;
+        const maxTokens = node.config.max_tokens || rankerConfig.maxTokens;
+
         const completion = await openai.chat.completions.create({
-          model: node.config.model || 'gpt-4o-mini',
+          model,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userContent },
           ],
-          temperature: node.config.temperature ?? 0.3,
-          max_tokens: node.config.max_tokens || 200,
+          temperature,
+          max_tokens: maxTokens,
           response_format: { type: 'json_object' },
         });
         const content = JSON.parse(completion.choices[0].message.content);
@@ -711,7 +737,7 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
               }
             : {
                 clarification_message:
-                  "To recommend the best bikes, please share your budget (e.g. RM 5,000), area (e.g. Puchong), and preferred model if any.",
+                  "To recommend the best products, please share your budget (e.g. RM 5,000), area (e.g. Puchong), and preferred model if any.",
               };
 
         return {

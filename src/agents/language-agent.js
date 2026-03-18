@@ -49,7 +49,7 @@ class LanguageAgent {
     const looksLikeBudgetOrBikeQuery =
       /\brm\s*\d/i.test(msg) ||
       /预算|budget|bajet/i.test(msg) ||
-      /\b(bike|motor|kapcai|scooter|yamaha|honda|modenas|suzuki|kawasaki)\b/i.test(msg);
+      /\b(bike|motor|kapcai|scooter|motosikal|摩托|摩多)\b/i.test(msg);
     const looksLikeLanguageChoice =
       /^1$|^2$|^3$|^english$|^malay$|^bm$|^bahasa$|^chinese$|^zh$|中文/i.test(msg);
 
@@ -659,8 +659,15 @@ class LanguageAgent {
         console.log(`   [NLP] Processing message: "${message.substring(0, 50)}..."`);
       }
 
+      // Language agent uses analyzer role config
+      const { AI_ROLES, getRoleConfig } = await import('../config/ai-registry.js');
+      const analyzerConfig = getRoleConfig(AI_ROLES.ANALYZER);
+      const model = node.config.model || analyzerConfig.model;
+      const temperature = node.config.temperature ?? analyzerConfig.temperature;
+      const maxTokens = node.config.max_tokens || analyzerConfig.maxTokens;
+
       const completion = await openai.chat.completions.create({
-        model: node.config.model || 'gpt-4o-mini',
+        model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },

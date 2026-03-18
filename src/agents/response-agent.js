@@ -1,4 +1,5 @@
 import openai, { TOKEN_CONFIG } from '../config/openai.js';
+import { AI_ROLES, getRoleConfig } from '../config/ai-registry.js';
 import { getLatestEntitiesFromContext } from '../utils/entities.js';
 import { productMatchesRequestedModel } from '../utils/products.js';
 
@@ -160,14 +161,20 @@ class ResponseAgent {
         'You are a friendly sales assistant. Rewrite the reply to sound natural, clear and concise.');
 
     try {
+      // Get config from registry (can be overridden by node.config)
+      const roleConfig = getRoleConfig(AI_ROLES.OPTIMIZER);
+      const model = node.config.model || roleConfig.model;
+      const temperature = node.config.temperature ?? roleConfig.temperature;
+      const maxTokens = node.config.max_tokens || roleConfig.maxTokens;
+
       const completion = await openai.chat.completions.create({
-        model: node.config.model || 'gpt-4o-mini',
+        model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: response },
         ],
-        temperature: node.config.temperature ?? TOKEN_CONFIG.TEMPERATURE.STRICT,
-        max_tokens: node.config.max_tokens || 600,
+        temperature,
+        max_tokens: maxTokens,
       });
 
       const optimized = (completion.choices[0].message.content || '').trim();
@@ -182,7 +189,8 @@ class ResponseAgent {
       console.error('[Optimizer] Error optimizing response:', error.message);
       let fallback = response.replace(/\n{3,}/g, '\n\n').trim();
       const estimatedTokens = Math.ceil(fallback.length / 4);
-      const maxTokens = node.config.max_tokens || 600;
+      const roleConfig = getRoleConfig(AI_ROLES.OPTIMIZER);
+      const maxTokens = node.config.max_tokens || roleConfig.maxTokens;
       if (estimatedTokens > maxTokens) {
         fallback = `${fallback.substring(0, maxTokens * 4)}...`;
       }
