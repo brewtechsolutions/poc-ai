@@ -9,6 +9,7 @@ import SearchAgent from '../agents/search-agent.js';
 import LanguageAgent from '../agents/language-agent.js';
 import AnalysisAgent from '../agents/analysis-agent.js';
 import ResponseAgent from '../agents/response-agent.js';
+import { AI_ROLES, getRoleConfig } from '../config/ai-registry.js';
 
 // Load workflow JSON without import assertions for broader Node compatibility
 const workflowPath = path.resolve(process.cwd(), 'workflow.json');
@@ -20,6 +21,7 @@ const workflow = JSON.parse(fs.readFileSync(workflowPath, 'utf-8'));
 class WorkflowEngine {
   constructor() {
     this.workflow = workflow.workflow;
+    this.optimizerRoleConfig = getRoleConfig(AI_ROLES.OPTIMIZER);
     this.nodes = new Map();
     this.workflow.nodes.forEach(node => {
       this.nodes.set(node.id, node);
@@ -764,7 +766,8 @@ class WorkflowEngine {
         const availableBrands = Array.isArray(d.availableBrands) ? d.availableBrands.join(', ') : '';
         const lang = context.language || 'english';
         const templates = this.workflow.templates?.brand_not_available;
-        let message = templates?.[lang] || templates?.english || `Sorry, we don't have *${brand}* in our inventory. We have: ${availableBrands}. Which brand are you interested in?`;
+        const noResultsTemplates = this.workflow.templates?.no_results;
+        let message = templates?.[lang] || templates?.english || noResultsTemplates?.[lang] || noResultsTemplates?.english || '';
         message = message.replace(/\{brand\}/g, brand).replace(/\{available_brands\}/g, availableBrands);
         if (process.env.DEBUG === 'true') console.log('[Workflow] Brand unavailable response:', brand, availableBrands);
         return {
@@ -809,14 +812,15 @@ class WorkflowEngine {
         if (node.id === 'clarification_handler' && context.lastIntent) {
           userContent = `Last intent: ${context.lastIntent}. User message: "${userContent}". What is missing: budget, area, or model? Ask for ONE thing in a friendly way.`;
         }
+        const roleCfg = this.optimizerRoleConfig;
         const completion = await openai.chat.completions.create({
-          model: node.config.model || 'gpt-4o-mini',
+          model: node.config.model || roleCfg.model,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userContent },
           ],
-          temperature: node.config.temperature ?? 0.3,
-          max_tokens: node.config.max_tokens || 200,
+          temperature: node.config.temperature ?? roleCfg.temperature,
+          max_tokens: node.config.max_tokens || roleCfg.maxTokens,
           response_format: { type: 'json_object' },
         });
         const content = JSON.parse(completion.choices[0].message.content);
@@ -829,9 +833,11 @@ class WorkflowEngine {
       } catch (err) {
         console.error('ML node error (', node.id, '):', err.message);
         const lang = context.language || 'english';
+        const noResultsTemplates = this.workflow.templates?.no_results;
+        const clarificationTemplates = this.workflow.templates?.clarification_questions;
         const fallback = node.id === 'no_results_handler'
-          ? { message: "Sorry, we don't have that right now. Would you like to try a different budget or area?" }
-          : { clarification_message: "To recommend the best bikes, please share your budget (e.g. RM 5,000), area (e.g. Puchong), and preferred model if any." };
+          ? { message: noResultsTemplates?.[lang] || noResultsTemplates?.english || '' }
+          : { clarification_message: clarificationTemplates?.[lang] || clarificationTemplates?.english || '' };
         return {
           data: fallback,
           tokensUsed: 0,
