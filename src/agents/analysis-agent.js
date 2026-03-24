@@ -134,71 +134,22 @@ function parseStructuredBudgetAreaModel(message, context = {}) {
  * AnalysisAgent - main class.
  */
 class AnalysisAgent {
-  /**
-   * Get intent enum from config (workflow.json) or fallback to defaults
-   */
-  static getIntentEnum(config = {}) {
-    if (config.intents && Array.isArray(config.intents)) {
-      return config.intents;
-    }
-    // Fallback defaults (for backward compatibility)
-    return [
-      'greeting',
-      'product_recommendation',
-      'more_options',
-      'model_selection',
-      'more_details',
-      'price_inquiry',
-      'budget_question',
-      'area_question',
-      'model_question',
-      'specification_question',
-      'test_ride_request',
-      'test_ride_booking',
-      'financing_question',
-      'trade_in_question',
-      'agent_request',
-      'goodbye',
-      'out_of_scope',
-    ];
-  }
-
-  /**
-   * Get entity schema from config or fallback to defaults
-   */
-  static getEntitySchema(config = {}) {
-    if (config.entities && Array.isArray(config.entities)) {
-      return config.entities;
-    }
-    // Fallback defaults
-    return ['budget', 'area', 'location', 'model', 'brand', 'selected_index'];
-  }
-
-  /**
-   * Get missing slots from config or fallback to defaults
-   */
-  static getMissingSlots(config = {}) {
-    if (config.missing_slots && Array.isArray(config.missing_slots)) {
-      return config.missing_slots;
-    }
-    // Fallback defaults
-    return ['budget', 'area', 'model'];
-  }
-
   static getToolDefinition(config = {}) {
-    const intentEnum = this.getIntentEnum(config);
-    const entitySchema = this.getEntitySchema(config);
-    const missingSlots = this.getMissingSlots(config);
-    
-    // Build entity properties dynamically
+    const intents = Array.isArray(config.intents) ? config.intents : [];
+    const languages = Array.isArray(config.languages) ? config.languages : ['english'];
+    const missingSlots = Array.isArray(config.missing_slots) ? config.missing_slots : [];
+
     const entityProperties = {};
-    entitySchema.forEach(entity => {
-      if (entity === 'selected_index') {
-        entityProperties[entity] = { type: 'integer' };
-      } else {
-        entityProperties[entity] = { type: 'string' };
+    (config.entities || []).forEach(entity => {
+      if (!entity) return;
+      if (typeof entity === 'string') {
+        entityProperties[entity] = { type: entity === 'selected_index' ? 'integer' : 'string' };
+        return;
       }
+      if (!entity.name) return;
+      entityProperties[entity.name] = { type: entity.type || 'string' };
     });
+
     return [
       {
         type: 'function',
@@ -210,13 +161,13 @@ class AnalysisAgent {
             type: 'object',
             additionalProperties: false,
             properties: {
-              intent: { type: 'string', enum: intentEnum },
+              intent: { type: 'string', enum: intents },
               entities: {
                 type: 'object',
                 additionalProperties: true,
                 properties: entityProperties,
               },
-              language: { type: 'string', enum: ['english', 'malay', 'chinese'] },
+              language: { type: 'string', enum: languages },
               confidence: { type: 'number', minimum: 0, maximum: 1 },
               suggestedQuestion: { type: ['string', 'null'] },
               missingInfo: {
@@ -249,15 +200,19 @@ class AnalysisAgent {
   }
 
   static normalizePlanFromModel(raw, context, tokensUsed, source, config = {}) {
-    const intentEnum = new Set(this.getIntentEnum(config));
-    // Use first product-related intent as fallback
-    const fallbackIntent = config.intents?.find(i => i.includes('recommendation') || i.includes('inquiry')) || 'product_recommendation';
-    const safeIntent = intentEnum.has(raw?.intent) ? raw.intent : fallbackIntent;
+    const intentSet = new Set(config.intents || []);
+    const fallbackIntent = config.fallback_intent || config.intents?.[0];
+    if (!fallbackIntent) {
+      throw new Error('[AnalysisAgent] config.fallback_intent is required');
+    }
+    const safeIntent = intentSet.has(raw?.intent) ? raw.intent : fallbackIntent;
     const entities = raw?.entities && typeof raw.entities === 'object' ? raw.entities : {};
+
     return {
       intent: safeIntent,
       entities,
-      language: raw?.language || context.language || 'english',
+      // Respect session-locked language first; do not overwrite with model detection.
+      language: context.language || raw?.language || config.languages?.[0] || 'english',
       confidence: typeof raw?.confidence === 'number' ? raw.confidence : 0.7,
       suggestedQuestion: raw?.suggestedQuestion ?? null,
       missingInfo: Array.isArray(raw?.missingInfo) ? raw.missingInfo : [],
@@ -276,113 +231,79 @@ class AnalysisAgent {
    * @param {object} context - { user_message, conversationHistory, lastIntent, entities, lastShownProducts, language, hasAskedBudget, hasAskedArea, hasAskedModel }
    * @returns {object|null} Plan with intent, entities, etc., or null to fall back to LLM.
    */
-  static fastPath(context) {
+  static fastPath(context, config = {}) {
     const message = (context.user_message || '').trim();
-    const lower = message.toLowerCase();
-    const trimmed = message.trim();
 
-    // Greeting
-    if (/^(hi|hello|hey|halo|hai|你好|您好|嗨)$/i.test(trimmed) || /good morning|good afternoon|good evening/i.test(lower)) {
-      if (DEBUG) console.log('[AnalysisAgent] fastPath: greeting');
-      return {
-        intent: 'greeting',
-        entities: {},
-        language: context.language || 'english',
-        confidence: 0.95,
-        suggestedQuestion: null,
-        missingInfo: [],
-        hasAskedBudget: context.hasAskedBudget || false,
-        hasAskedArea: context.hasAskedArea || false,
-        hasAskedModel: context.hasAskedModel || false,
-        salesInsight: null,
-        skipAlreadyShownIds: [],
-        source: 'fast_path',
-        tokensUsed: 0,
-      };
-    }
-
-    // Agent / human request
-    if (/\bagent\b|客服|找客服|真人|人工|转人工|talk to (a )?human/i.test(lower)) {
-      if (DEBUG) console.log('[AnalysisAgent] fastPath: agent_request');
-      return {
-        intent: 'agent_request',
-        entities: {},
-        language: context.language || 'english',
-        confidence: 0.95,
-        suggestedQuestion: null,
-        missingInfo: [],
-        hasAskedBudget: context.hasAskedBudget || false,
-        hasAskedArea: context.hasAskedArea || false,
-        hasAskedModel: context.hasAskedModel || false,
-        salesInsight: null,
-        skipAlreadyShownIds: [],
-        source: 'fast_path',
-        tokensUsed: 0,
-      };
-    }
-
-    // Goodbye
-    if (/bye|goodbye|see you|exit|quit|再见|拜拜|selamat tinggal/i.test(lower) && trimmed.length < 30) {
-      if (DEBUG) console.log('[AnalysisAgent] fastPath: goodbye');
-      return {
-        intent: 'goodbye',
-        entities: {},
-        language: context.language || 'english',
-        confidence: 0.95,
-        suggestedQuestion: null,
-        missingInfo: [],
-        hasAskedBudget: context.hasAskedBudget || false,
-        hasAskedArea: context.hasAskedArea || false,
-        hasAskedModel: context.hasAskedModel || false,
-        salesInsight: null,
-        skipAlreadyShownIds: [],
-        source: 'fast_path',
-        tokensUsed: 0,
-      };
+    for (const rule of (config.fast_path_rules || [])) {
+      if (!rule || !rule.pattern || !rule.intent) continue;
+      if (rule.maxLength && message.length > rule.maxLength) continue;
+      try {
+        const regex = new RegExp(rule.pattern, rule.flags || '');
+        if (!regex.test(message)) continue;
+        if (DEBUG) console.log('[AnalysisAgent] fastPath:', rule.intent);
+        return this._makeFastResult(rule.intent, {}, context, config);
+      } catch (err) {
+        if (DEBUG) console.warn('[AnalysisAgent] Invalid fast_path_rule regex:', rule.pattern, err.message);
+      }
     }
 
     // Model selection by number (1, 2, 3) from last shown products
     const lastShown = context.lastShownProducts || context.metadata?.lastShownProducts;
-    if (lastShown?.length && /^[1-9]\d*\.?$/.test(trimmed)) {
-      const num = parseInt(trimmed, 10);
+    if (lastShown?.length && /^[1-9]\d*\.?$/.test(message)) {
+      const num = parseInt(message, 10);
       if (num >= 1 && num <= lastShown.length) {
         if (DEBUG) console.log('[AnalysisAgent] fastPath: model_selection by number', num);
-        return {
-          intent: 'model_selection',
-          entities: { selected_index: num, ...(context.entities || {}) },
-          language: context.language || 'english',
-          confidence: 0.95,
-          suggestedQuestion: null,
-          missingInfo: [],
-          hasAskedBudget: context.hasAskedBudget || false,
-          hasAskedArea: context.hasAskedArea || false,
-          hasAskedModel: context.hasAskedModel || false,
-          salesInsight: null,
-          skipAlreadyShownIds: [],
-          source: 'fast_path',
-          tokensUsed: 0,
-        };
+        return this._makeFastResult(
+          'model_selection',
+          { selected_index: num, ...(context.entities || {}) },
+          context,
+          config,
+        );
       }
     }
 
     return null;
   }
 
+  static _makeFastResult(intent, entities, context, config = {}) {
+    return {
+      intent,
+      entities,
+      language: context.language || config.languages?.[0] || 'english',
+      confidence: 0.95,
+      suggestedQuestion: null,
+      missingInfo: [],
+      hasAskedBudget: context.hasAskedBudget || false,
+      hasAskedArea: context.hasAskedArea || false,
+      hasAskedModel: context.hasAskedModel || false,
+      salesInsight: null,
+      skipAlreadyShownIds: [],
+      source: 'fast_path',
+      tokensUsed: 0,
+    };
+  }
+
   /**
    * Build system prompt from config, active skills, and context.
-   * If config.system_prompt is provided, use it; otherwise build from skills.
    */
-  static buildSystemPrompt(activeSkillNames, context, config = {}) {
+  static buildSystemPrompt(config = {}, context = {}) {
+    const mergedSkills = { ...SKILLS };
+    for (const skill of (config.skills || [])) {
+      if (skill?.name) mergedSkills[skill.name] = skill;
+    }
+
+    const activeSkillNames = config.active_skills?.length ? config.active_skills : DEFAULT_SKILLS;
     const skills = activeSkillNames
-      .map(name => SKILLS[name])
+      .map(name => mergedSkills[name])
       .filter(Boolean);
     const skillBlocks = skills.map(s => s.prompt).join('\n');
-    const lang = context.language || 'english';
-    
-    // Use system prompt from config if provided, otherwise build from skills
-    const basePrompt = config.system_prompt || 
-      `You are a WhatsApp sales assistant. Use the skills below to classify messages and extract entities for routing. Always call the tool classify_message and fill its schema accurately.`;
-    
+    const lang = context.language || config.languages?.[0] || 'english';
+
+    const basePrompt = config.system_prompt;
+    if (!basePrompt) {
+      throw new Error('[AnalysisAgent] config.system_prompt is required');
+    }
+
     return `${basePrompt}
 
 ${skillBlocks}
@@ -397,13 +318,16 @@ Conversation language: ${lang}. Last intent: ${context.lastIntent || 'none'}. Ex
    * @returns {Promise<object>} Plan: intent, entities, language, confidence, suggestedQuestion, missingInfo, hasAskedBudget, hasAskedArea, hasAskedModel, salesInsight, skipAlreadyShownIds, source.
    */
   static async analyze(context, options = {}) {
-    const activeSkills = options.activeSkills || DEFAULT_SKILLS;
     const config = options.config || {}; // Config from workflow.json node.config
-    const fast = this.fastPath(context);
+    const fast = this.fastPath(context, config);
     if (fast) return fast;
 
-    const systemPrompt = this.buildSystemPrompt(activeSkills, context, config);
-    const history = (context.conversationHistory || []).slice(-6);
+    const systemPrompt = this.buildSystemPrompt(config, context);
+    const parsedHistoryWindow = Number(config.history_window ?? process.env.ANALYSIS_HISTORY_LIMIT ?? 6);
+    const historyWindow = Number.isFinite(parsedHistoryWindow) && parsedHistoryWindow >= 0
+      ? Math.floor(parsedHistoryWindow)
+      : 6;
+    const history = (context.conversationHistory || []).slice(-historyWindow);
     const messages = [
       { role: 'system', content: systemPrompt },
       ...history.map(m => ({
@@ -457,11 +381,11 @@ Conversation language: ${lang}. Last intent: ${context.lastIntent || 'none'}. Ex
       return plan;
     } catch (err) {
       console.error('[AnalysisAgent] LLM error:', err.message);
-      const fallbackIntent = config.intents?.find(i => i.includes('recommendation') || i.includes('inquiry')) || 'product_recommendation';
+      const fallbackIntent = config.fallback_intent || config.intents?.[0] || 'product_recommendation';
       return {
         intent: fallbackIntent,
         entities: {},
-        language: context.language || 'english',
+        language: context.language || config.languages?.[0] || 'english',
         confidence: 0.3,
         suggestedQuestion: null,
         missingInfo: [],

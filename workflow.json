@@ -63,7 +63,7 @@
         "name": "Analysis Agent",
         "config": {
           "model": "gpt-4o",
-          "system_prompt": "You are a WhatsApp sales assistant for a Malaysian shop.\n\nScope rules (VERY IMPORTANT):\n- You ONLY sell products and related services as defined in your domain.\n- Many model names can look like other product types, but you must assume the user is asking about YOUR product category unless they clearly specify otherwise (e.g. \"car\", \"laptop\", \"house\").\n- If the message is just a model name or model + number, TREAT IT AS A PRODUCT QUERY, NOT out_of_scope.\n- Only set intent to out_of_scope when the user is clearly asking for products outside your domain.\n\nIntent guidelines:\n- If user asks about a specific model name, use intent model_question.\n- If user asks generally \"got this?\", \"this model have?\", or just types a model name, use product_inquiry or product_recommendation depending on context.\n- Prefer product intents (product_recommendation, product_inquiry, model_question) instead of out_of_scope whenever the text can reasonably be a product model.\n\nUse the skills below to classify the message and extract entities for routing. Always call the tool classify_message and fill its schema accurately.",
+          "system_prompt": "You are a WhatsApp sales assistant for a Malaysian motorcycle shop.\n\nScope rules (VERY IMPORTANT):\n- You ONLY sell motorcycles and related services.\n- If the user mentions a clearly non-motorcycle brand (e.g. Samsung, Apple, Sony, LG, Dell, Huawei, Xiaomi, Oppo, Vivo, HP, Lenovo, Asus, Nike, Adidas), set intent to out_of_scope immediately.\n- If the user mentions a clearly non-motorcycle product type (e.g. phone, tablet, laptop, PC, computer, TV, fridge, washing machine, shoes, clothes, car, house, property), set intent to out_of_scope immediately.\n- If the message is just a model name that could be a motorcycle (e.g. Y15ZR, RS150R, LC135), treat as product_inquiry.\n- Only set intent to out_of_scope when the user is clearly asking for something outside motorcycles.\n- When in doubt between out_of_scope and product_inquiry, prefer product_inquiry ONLY if the name could plausibly be a motorcycle model.\n\nUse the skills below to classify the message and extract entities for routing. Always call the tool classify_message and fill its schema accurately.",
           "intents": [
             "greeting",
             "product_recommendation",
@@ -85,21 +85,27 @@
             "out_of_scope"
           ],
           "entities": [
-            "budget",
-            "price_range",
-            "area",
-            "location",
-            "model",
-            "brand",
-            "product_type",
-            "selected_index"
+            { "name": "budget", "type": "string" },
+            { "name": "budget_min", "type": "string" },
+            { "name": "budget_max", "type": "string" },
+            { "name": "price_range", "type": "string" },
+            { "name": "area", "type": "string" },
+            { "name": "location", "type": "string" },
+            { "name": "model", "type": "string" },
+            { "name": "brand", "type": "string" },
+            { "name": "product_type", "type": "string" },
+            { "name": "selected_index", "type": "integer" }
           ],
+          "languages": ["english", "malay", "chinese"],
+          "fallback_intent": "product_recommendation",
+          "history_window": 6,
           "missing_slots": [
             "budget",
             "area",
             "model"
           ],
           "active_skills": [
+            "out_of_scope_detector",
             "consultative_selling",
             "budget_intelligence",
             "local_market_expert",
@@ -108,6 +114,34 @@
             "objection_handler",
             "financing_advisor",
             "trade_in_specialist"
+          ],
+          "skills": [
+            {
+              "name": "out_of_scope_detector",
+              "prompt": "## Skill: Out-of-Scope Detector\n- IMMEDIATELY set intent to out_of_scope (confidence 0.99) if the user mentions ANY of these:\n  - Electronics brands: Samsung, Apple, iPhone, iPad, Sony, LG, Huawei, Xiaomi, Oppo, Vivo, Realme, OnePlus, Google Pixel, Dell, HP, Lenovo, Asus, Acer\n  - Product types: phone, smartphone, tablet, laptop, notebook, PC, computer, monitor, TV, television, fridge, refrigerator, washing machine, air conditioner, aircon\n  - Other categories: shoes, sneakers, clothes, clothing, car, SUV, truck, house, property, condo, apartment\n- When setting out_of_scope, also extract entities.product_type as the specific product name from the user's message (e.g. 'Samsung Galaxy Tab S11 Ultra', 'iPhone 15', 'laptop').\n- Do NOT ask a follow-up question for out_of_scope; just classify and move on.\n- Samsung Tab, iPhone, iPad, MacBook, Galaxy are NEVER motorcycles regardless of model number."
+            },
+            {
+              "name": "budget_intelligence",
+              "prompt": "## Skill: Budget Intelligence\n- 'more than', 'above', 'at least', 'minimum', 'from', 'starting from' -> set entities.budget_min only. Do NOT set budget or budget_max.\n- 'below', 'under', 'max', 'less than', 'up to', 'not more than' -> set entities.budget_max only. Do NOT set budget or budget_min.\n- 'around', 'about', 'budget X', just a plain number or range like 5k -> set entities.budget only.\n- 'RM5000 to RM8000', 'between 5k and 8k', '5k-8k' -> set both budget_min and budget_max. Do NOT set budget.\n- Extract digits only (no RM symbol, no commas). '10k' -> '10000', 'RM 8,500' -> '8500'.\n- Never guess direction - if unclear, use entities.budget."
+            }
+          ],
+          "fast_path_rules": [
+            {
+              "pattern": "^(hi|hello|hey|halo|hai|你好|您好|嗨)$",
+              "flags": "i",
+              "intent": "greeting"
+            },
+            {
+              "pattern": "\\\\bagent\\\\b|客服|找客服|真人|人工|转人工|talk to (a )?human",
+              "flags": "i",
+              "intent": "agent_request"
+            },
+            {
+              "pattern": "bye|goodbye|see you|exit|quit|再见|拜拜|selamat tinggal",
+              "flags": "i",
+              "intent": "goodbye",
+              "maxLength": 30
+            }
           ],
           "next": "analysis_router"
         }
@@ -367,7 +401,7 @@
           "model": "gpt-4o-mini",
           "temperature": 0.2,
           "max_tokens": 400,
-          "system_prompt": "You are a sales analysis agent. Based on the conversation context and the list of candidate products, analyze the user's message (budget, area/location, preferred model/brand, product type, specifications, new/used) and decide which products are the best fit. Consider: budget match, area availability, model preference, specifications, user intent, and popularity. Provide clear sales-focused reasoning. Return JSON with: products (array with id, relevance_score, reasoning), overall_reasoning, confidence.",
+          "system_prompt": "You are a sales analysis agent. Based on the conversation context and the list of candidate products, analyze the user's message (budget, area/location, preferred model/brand, product type, specifications, new/used) and decide which products are the best fit. Consider: budget match, area availability, model preference, specifications, user intent, and popularity. Provide clear sales-focused reasoning. Return JSON with: products (array with id, relevance_score, reasoning), overall_reasoning, confidence.\n\nBudget matching rules (read entities carefully):\n- entities.budget_min is set -> user wants price >= budget_min. Exclude bikes below budget_min. Rank higher-priced bikes as stronger matches.\n- entities.budget_max is set -> user wants price <= budget_max. Exclude bikes above budget_max.\n- entities.budget_min AND budget_max are both set -> user wants price within that range. Exclude bikes outside it.\n- entities.budget is set (no min/max) -> treat as a flexible target. Allow +/-20% variance.\n- If no budget entity is set -> rank by popularity and relevance only.",
           "product_type_label": "motorcycle",
           "ranking_factors": [
             "budget_match",
@@ -550,7 +584,7 @@
           "model": "gpt-4o-mini",
           "temperature": 0.3,
           "max_tokens": 250,
-          "system_prompt": "You are a motorcycle sales assistant. The user's search returned no results. Use the context: what they asked for (budget, area, model), and why nothing matched. Write a short, helpful response in the user's language (Malay/Chinese/English) that: 1) Briefly explains why there were no results (e.g. no bikes in that budget in that area, or we don't have that model). 2) Suggests 2–3 concrete next steps (e.g. try a different budget/area, ask for similar models we have). 3) Offers to connect them with the team if they want. Keep it concise and friendly. Return JSON with: message (string, the full response).",
+          "system_prompt": "You are a motorcycle sales assistant. The user's search returned no results.\n\nIMPORTANT: If the user was asking about a non-motorcycle product (phone, tablet, laptop, electronics, etc.), do NOT suggest motorcycles as alternatives. Instead, politely explain we only sell motorcycles and invite them to ask about bikes.\n\nIf the user WAS asking about a motorcycle that we don't have:\n1. Briefly explain why there were no results (wrong budget/area, model not in stock).\n2. Suggest 2-3 concrete next steps (try different budget/area, ask for similar models).\n3. Offer to connect them with the team.\n\nReturn JSON with: message (string), was_out_of_scope (boolean).",
           "next": "no_results_formatter"
         }
       },
@@ -746,9 +780,9 @@
         "chinese": "嗨～👋\n\n跟我说你比较习惯用哪一种语言：\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\n直接回复 1、2 或 3 就可以了。"
       },
       "out_of_scope": {
-        "english": "Got it, that one is not a motorcycle (for example, it could be a laptop, PC or other product). 😄 Here we only sell motorcycles. If you tell me your budget and area, I can help you find a suitable bike instead.",
-        "malay": "Faham, yang itu bukan motosikal (contohnya mungkin laptop, PC atau produk lain). 😄 Di sini kami hanya jual motosikal. Kalau anda beritahu bajet dan kawasan, saya boleh bantu cadangkan motor yang sesuai.",
-        "chinese": "明白，那不是摩托车（可能是笔电、电脑或其他产品）。😄 我们这里只卖摩托车。如果你告诉我预算和地区，我可以帮你推荐合适的摩托。"
+        "english": "Hmm, looks like that's not a motorcycle! 😄 We only sell bikes here. If you're looking for one, just tell me your budget and area and I'll help you find the perfect ride.",
+        "malay": "Hmm, nampaknya itu bukan motosikal! 😄 Kami hanya jual motor je. Kalau nak cari motor, bagitahu bajet dan kawasan anda.",
+        "chinese": "看来那不是摩托车！😄 我们这里只卖摩托车。如果你想找摩托，告诉我预算和地区，我来帮你。"
       },
       "greeting": {
         "english": "Hello! 👋 Welcome to MotorShop! I'm your AI motorcycle assistant. I can help you find the perfect bike based on your budget, location, and preferences.\n\nTo get started, please reply with:\n1. Budget (RM) – e.g. RM 5,000 – RM 8,000\n2. Area / Location – e.g. Puchong, PJ, KL\n3. Preferred model / brand (optional)\n\nAnswer in one line, for example: RM 5,000, Puchong, any 150cc sporty model",

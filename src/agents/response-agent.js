@@ -9,6 +9,17 @@ import { productMatchesRequestedModel } from '../utils/products.js';
  * Keeps WorkflowEngine focused on orchestration.
  */
 class ResponseAgent {
+  static resolveLanguage(context, workflow, nodeConfig = {}) {
+    return (
+      context.language ||
+      context.metadata?.language ||
+      nodeConfig.default_language ||
+      workflow?.default_language ||
+      workflow?.config?.default_language ||
+      'english'
+    );
+  }
+
 
   /** Formatter nodes: build WhatsApp-friendly text from templates and products. */
   static handleFormatter(node, context, workflow) {
@@ -16,7 +27,7 @@ class ResponseAgent {
     const templateKey = node.config.template;
     const lastIntent = context.lastIntent || context.lastResult?.data?.intent;
     // Language is locked to context.language once chosen
-    const language = context.language || 'english';
+    const language = this.resolveLanguage(context, workflow, node.config);
     const entities = getLatestEntitiesFromContext(context);
     const modelPart = (entities.model || '').trim();
     const brandPart = (entities.brand || '').trim();
@@ -153,12 +164,19 @@ class ResponseAgent {
       };
     }
 
-    const lang = context.language || 'english';
-    const base = `You must respond ONLY in ${lang}. Never switch languages. Always use MYR or RM for prices (Malaysian Ringgit). Never use $ or USD.`;
+    const lockedLanguage = this.resolveLanguage(context, null, node.config);
+    const fixedLanguagePolicy = [
+      `MANDATORY LANGUAGE POLICY: Output ONLY in ${lockedLanguage}.`,
+      `Never switch to another language even if the user message uses another language.`,
+      `If needed, translate the content into ${lockedLanguage} while preserving meaning.`,
+    ].join(' ');
+    const basePrompt =
+      node.config.system_prompt ||
+      'You are a friendly sales assistant. Rewrite the reply to sound natural, clear and concise.';
     const systemPrompt =
-      `${base}\n\n` +
-      (node.config.system_prompt ||
-        'You are a friendly sales assistant. Rewrite the reply to sound natural, clear and concise.');
+      node.config.language_policy_prompt
+        ? `${fixedLanguagePolicy}\n\n${node.config.language_policy_prompt}\n\n${basePrompt}`.trim()
+        : `${fixedLanguagePolicy}\n\n${basePrompt}`.trim();
 
     try {
       // Get config from registry (can be overridden by node.config)
@@ -205,7 +223,7 @@ class ResponseAgent {
   static handleHandler(node, context, workflow) {
     const templateKey = node.config.template;
     // Always respect the conversation language once set
-    const language = context.language || 'english';
+    const language = this.resolveLanguage(context, workflow, node.config);
 
     let template = '';
     if (typeof workflow.templates[templateKey] === 'object') {
@@ -298,7 +316,7 @@ class ResponseAgent {
     if (!response) {
       const intent = context.lastResult?.data?.intent || 'greeting';
       // Final fallback also sticks to the previously selected conversation language
-      const language = context.language || 'english';
+      const language = this.resolveLanguage(context, workflow, node.config);
       const templateKey = intent === 'greeting' ? 'greeting' : `${intent}_response`;
       let template = '';
 
@@ -320,8 +338,18 @@ class ResponseAgent {
         template = workflow.templates.greeting || '';
       }
 
+      if (!template && typeof workflow.templates?.error_fallback === 'object') {
+        template =
+          workflow.templates.error_fallback[language] ||
+          workflow.templates.error_fallback.english ||
+          '';
+      } else if (!template && workflow.templates?.error_fallback) {
+        template = workflow.templates.error_fallback;
+      }
+
       response =
         template ||
+        node.config.fallback_response ||
         "I apologize, I couldn't process that request. Please try rephrasing your question.";
     }
 

@@ -55,10 +55,9 @@ class LanguageAgent {
 
     if (!context.languageLocked && looksLikeBudgetOrBikeQuery && !looksLikeLanguageChoice) {
       context.language = context.language || 'english';
-      context.languageLocked = true;
       if (process.env.DEBUG === 'true') {
         console.log(
-          `   [LanguageSelector] Detected content message (budget/bike) without language; defaulting to ${context.language} and continuing`,
+          `   [LanguageSelector] Detected content message (budget/bike) without explicit language selection; defaulting to ${context.language} and continuing (not locking language)`,
         );
       }
       return { data: { language: context.language }, tokensUsed: 0, next: nextIfSet };

@@ -110,9 +110,13 @@ class WorkflowEngine {
         executionContext.lastResult = result;
         executionContext.allResults.push(result); // Store for response extraction
 
-        // Track detected language in execution context (if not already set)
-        if (result.data?.language && !executionContext.language) {
-          executionContext.language = result.data.language;
+        // Track language, but never overwrite a locked language.
+        if (result.data?.language) {
+          if (!executionContext.language) {
+            executionContext.language = result.data.language;
+          } else if (!executionContext.languageLocked) {
+            executionContext.language = result.data.language;
+          }
         }
         if (result.data?.intent) {
           executionContext.lastIntent = result.data.intent;
@@ -790,7 +794,13 @@ class WorkflowEngine {
         }
       }
       try {
-        const systemPrompt = node.config.system_prompt;
+        const lockedLanguage = context.language || context.metadata?.language || 'english';
+        const systemPrompt = [
+          `MANDATORY LANGUAGE POLICY: Output ONLY in ${lockedLanguage}.`,
+          'Never switch language based on user input language.',
+          'If user writes in another language, still reply in the locked conversation language.',
+          node.config.system_prompt,
+        ].join('\n\n');
         let userContent = typeof userQuery === 'string' ? userQuery : String(context.user_message || '');
         if (node.id === 'no_results_handler' && lastResult) {
           const searchInfo = lastResult.entities || context.metadata?.entities || {};

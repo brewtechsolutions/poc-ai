@@ -125,9 +125,9 @@ class SearchAgent {
     const limit = isMoreOptions
       ? (node.config.more_options_limit || 10)
       : (node.config.limit || 15);
-
-    const searchType = context.searchType || lastResult?.searchType || null;
-    const isBudgetOnly = searchType === 'budget_only';
+    try {
+      const searchType = context.searchType || lastResult?.searchType || null;
+      const isBudgetOnly = searchType === 'budget_only';
 
     // Brand-availability check: if user asks for a specific brand only, query DB first.
     // Skip this in budget_only mode.
@@ -384,40 +384,62 @@ class SearchAgent {
       }
     }
 
-    const useFallbackWhenEmpty = node.config.use_fallback_when_empty === true;
-    if ((!finalProducts || finalProducts.length === 0) && useFallbackWhenEmpty) {
-      const fallbackLimit = node.config.fallback_limit || 5;
-      const fallbackWhere = {
-        AND: [
-          { active: true },
-          { inStock: true },
-          ...(skipIds.length > 0 ? [{ id: { notIn: skipIds } }] : []),
-        ],
-      };
-      const fallbackProducts = await prisma.product.findMany({
-        where: fallbackWhere,
-        orderBy: { popularity: 'desc' },
-        take: fallbackLimit,
-      });
-      finalProducts = fallbackProducts;
-    }
+      const useFallbackWhenEmpty = node.config.use_fallback_when_empty === true;
+      if ((!finalProducts || finalProducts.length === 0) && useFallbackWhenEmpty) {
+        const fallbackLimit = node.config.fallback_limit || 5;
+        const fallbackWhere = {
+          AND: [
+            { active: true },
+            { inStock: true },
+            ...(skipIds.length > 0 ? [{ id: { notIn: skipIds } }] : []),
+          ],
+        };
+        const fallbackProducts = await prisma.product.findMany({
+          where: fallbackWhere,
+          orderBy: { popularity: 'desc' },
+          take: fallbackLimit,
+        });
+        finalProducts = fallbackProducts;
+      }
 
     // Two groups: within budget (≤ budget), then slightly over (budget+1 to budget+999). Within sorted price DESC (best value first), over sorted price ASC (cheapest over first). Max 5 within + 3 over.
-    if (budgetNum != null && budgetCap != null && finalProducts && finalProducts.length > 0) {
-      const within = finalProducts.filter(p => p.price != null && p.price <= budgetNum)
-        .sort((a, b) => (b.price || 0) - (a.price || 0))
-        .slice(0, 5);
-      const slightlyOver = finalProducts.filter(p => p.price != null && p.price > budgetNum && p.price <= budgetCap)
-        .sort((a, b) => (a.price || 0) - (b.price || 0))
-        .slice(0, 3);
-      finalProducts = within.length > 0 || slightlyOver.length > 0 ? [...within, ...slightlyOver] : finalProducts;
-    }
+      if (budgetNum != null && budgetCap != null && finalProducts && finalProducts.length > 0) {
+        const within = finalProducts.filter(p => p.price != null && p.price <= budgetNum)
+          .sort((a, b) => (b.price || 0) - (a.price || 0))
+          .slice(0, 5);
+        const slightlyOver = finalProducts.filter(p => p.price != null && p.price > budgetNum && p.price <= budgetCap)
+          .sort((a, b) => (a.price || 0) - (b.price || 0))
+          .slice(0, 3);
+        finalProducts = within.length > 0 || slightlyOver.length > 0 ? [...within, ...slightlyOver] : finalProducts;
+      }
 
-    return {
-      data: { products: finalProducts || [] },
-      tokensUsed: 0,
-      found: (finalProducts && finalProducts.length) > 0,
-    };
+      return {
+        data: { products: finalProducts || [] },
+        tokensUsed: 0,
+        found: (finalProducts && finalProducts.length) > 0,
+      };
+    } catch (error) {
+      const dbErrorText = String(error?.message || '');
+      const isDbConnectivityError =
+        /Can't reach database server|connect|connection|ECONN|P1001|P1002|P1017/i.test(dbErrorText);
+
+      if (isDbConnectivityError) {
+        console.error('[SearchAgent] Database connectivity error during semantic search:', dbErrorText);
+        return {
+          data: {
+            products: [],
+            found: false,
+            dbError: true,
+            dbErrorMessage: dbErrorText,
+          },
+          tokensUsed: 0,
+          found: false,
+          next: 'no_results_handler',
+        };
+      }
+
+      throw error;
+    }
   }
 
   /**
