@@ -671,8 +671,8 @@ class LanguageAgent {
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
-        temperature: node.config.temperature || TOKEN_CONFIG.TEMPERATURE.STRICT,
-        max_tokens: node.config.max_tokens || 150,
+        temperature,
+        max_tokens: maxTokens,
         response_format: { type: 'json_object' },
       });
 
