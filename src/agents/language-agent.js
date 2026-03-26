@@ -51,14 +51,24 @@ class LanguageAgent {
       /\brm\s*\d/i.test(msg) ||
       /预算|budget|bajet/i.test(msg) ||
       /\b(bike|motor|kapcai|scooter|motosikal|摩托|摩多)\b/i.test(msg);
+
+    const looksLikeLocationRefinement =
+      /我在|我住在|我是在|但是我在/.test(msg) ||
+      /(?:but )?i(?:'m| am) (?:in|at|from)\s+\w/i.test(msg) ||
+      /staying in|based in|located in/i.test(msg) ||
+      /area|kawasan|dekat|near|berhampiran/.test(msg);
     const looksLikeLanguageChoice =
       /^1$|^2$|^3$|^english$|^malay$|^bm$|^bahasa$|^chinese$|^zh$|中文/i.test(msg);
 
-    if (!context.languageLocked && looksLikeBudgetOrBikeQuery && !looksLikeLanguageChoice) {
+    if (
+      !context.languageLocked &&
+      (looksLikeBudgetOrBikeQuery || looksLikeLocationRefinement) &&
+      !looksLikeLanguageChoice
+    ) {
       context.language = context.language || 'english';
       if (process.env.DEBUG === 'true') {
         console.log(
-          `   [LanguageSelector] Detected content message (budget/bike) without explicit language selection; defaulting to ${context.language} and continuing (not locking language)`,
+          `   [LanguageSelector] Detected content message (budget/bike/location) without explicit language selection; defaulting to ${context.language} and continuing (not locking language)`,
         );
       }
       return { data: { language: context.language }, tokensUsed: 0, next: nextIfSet };
