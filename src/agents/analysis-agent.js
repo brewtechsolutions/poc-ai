@@ -36,9 +36,10 @@ export const SKILLS = {
     prompt: `
 ## Skill: Local Market Expert
 - Extract area/location from ANY location name mentioned: "Puchong", "KL", "JB", "Penang", "Kota Kinabalu", "Shah Alam", "Indonesia", "Singapore", "Jakarta", "我住Puchong", "area Shah Alam", etc.
-- If the user just says a location name (e.g.  "puchong", "KL"), extract it as entities.area and entities.location.
-- Even if the intent is area_question, if a location is mentioned, extract it as an entity so we can search with that area context.
-- Set entities.area and entities.location. Use for availability and "in your area" recommendations.`,
+- Set entities.area and entities.location when a location is detected.
+- IMPORTANT: If the user message contains ONLY a location name with no buying or searching intent (e.g. just "KLCC", "USA", "Penang"), set intent to area_question and set missingInfo: ["productType"] — do NOT trigger a product search.
+- Only set intent to bike_recommendation if the user has expressed a clear buying or searching intent alongside the location (e.g. "I want bike in KL", "cari motor dekat Puchong", "show me bikes near KLCC").
+- If the user says ONLY a location, reply by asking what they are looking for in that area.`,
   },
   context_memory: {
     name: 'context_memory',

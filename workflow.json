@@ -119,7 +119,11 @@
           "skills": [
             {
               "name": "out_of_scope_detector",
-              "prompt": "## Skill: Out-of-Scope Detector\n- IMMEDIATELY set intent to out_of_scope (confidence 0.99) if the user mentions ANY of these:\n  - Electronics brands: Samsung, Apple, iPhone, iPad, Sony, LG, Huawei, Xiaomi, Oppo, Vivo, Realme, OnePlus, Google Pixel, Dell, HP, Lenovo, Asus, Acer\n  - Product types: phone, smartphone, tablet, laptop, notebook, PC, computer, monitor, TV, television, fridge, refrigerator, washing machine, air conditioner, aircon\n  - Other categories: shoes, sneakers, clothes, clothing, car, SUV, truck, house, property, condo, apartment\n- When setting out_of_scope, also extract entities.product_type as the specific product name from the user's message (e.g. 'Samsung Galaxy Tab S11 Ultra', 'iPhone 15', 'laptop').\n- Do NOT ask a follow-up question for out_of_scope; just classify and move on.\n- Samsung Tab, iPhone, iPad, MacBook, Galaxy are NEVER motorcycles regardless of model number."
+              "prompt": "## Skill: Out-of-Scope Detector\n- IMMEDIATELY set intent to out_of_scope (confidence 0.99) if the user mentions ANY of these:\n  - Electronics brands: Samsung, Apple, iPhone, iPad, Sony, LG, Huawei, Xiaomi, Oppo, Vivo, Realme, OnePlus, Google Pixel, Dell, HP, Lenovo, Asus, Acer\n  - Product types: phone, smartphone, tablet, laptop, notebook, PC, computer, monitor, TV, television, fridge, refrigerator, washing machine, air conditioner, aircon\n  - Other categories: shoes, sneakers, clothes, clothing, car, SUV, truck, house, property, condo, apartment\n  - Landmarks, buildings, or real estate: KLCC, Petronas Tower, KL Tower, Menara KL, Burj Khalifa, Eiffel Tower, or ANY famous building, landmark, monument, or tourist attraction - these are NEVER motorcycles regardless of how the user phrases it.\n- When setting out_of_scope, also extract entities.product_type as the specific product name from the user's message (e.g. 'KLCC', 'KL Tower', 'Samsung Galaxy Tab S11 Ultra', 'iPhone 15', 'laptop').\n- Do NOT ask a follow-up question for out_of_scope; just classify and move on.\n- Samsung Tab, iPhone, iPad, MacBook, Galaxy are NEVER motorcycles regardless of model number."
+            },
+            {
+              "name": "local_market_expert",
+              "prompt": "## Skill: Local Market Expert\n- Extract area/location from ANY location name mentioned: \"Puchong\", \"KL\", \"JB\", \"Penang\", \"Kota Kinabalu\", \"Shah Alam\", \"Indonesia\", \"Singapore\", \"Jakarta\", \"我住Puchong\", \"area Shah Alam\", etc.\n- Set entities.area and entities.location when a location is detected.\n- IMPORTANT: Famous landmarks and buildings (KLCC, KL Tower, Petronas Tower, Menara KL, Burj Khalifa, Eiffel Tower, or any world-famous tourist attraction) are NOT bike search locations - if the user wants to buy them, defer to out_of_scope_detector. Do NOT extract them as entities.area or entities.location.\n- Only set intent to bike_recommendation if the user has a clear buying intent for a MOTORCYCLE alongside the location (e.g. \"I want bike in KL\", \"cari motor dekat Puchong\", \"show me bikes near Shah Alam\").\n- Never use a landmark or building name as a location filter for bike search."
             },
             {
               "name": "budget_intelligence",
@@ -471,7 +475,7 @@
         "config": {
           "template": "area_info",
           "language_aware": true,
-          "next": "context_update"
+          "next": "response_optimizer"
         }
       },
       {
