@@ -113,8 +113,11 @@ ${productsList}
 Rank products by relevance. Return top 3 most relevant with scores and reasoning.`;
 
     try {
+      // Use ranker config from registry
+      const { AI_ROLES, getRoleConfig } = await import('../config/ai-registry.js');
+      const rankerConfig = getRoleConfig(AI_ROLES.RANKER);
       const completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: rankerConfig.model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },

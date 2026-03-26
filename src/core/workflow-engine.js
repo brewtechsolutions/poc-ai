@@ -9,6 +9,8 @@ import SearchAgent from '../agents/search-agent.js';
 import LanguageAgent from '../agents/language-agent.js';
 import AnalysisAgent from '../agents/analysis-agent.js';
 import ResponseAgent from '../agents/response-agent.js';
+import { AI_ROLES, getRoleConfig } from '../config/ai-registry.js';
+import { resolveProductFromLedger } from '../utils/session-option-sets.js';
 
 // Load workflow JSON without import assertions for broader Node compatibility
 const workflowPath = path.resolve(process.cwd(), 'workflow.json');
@@ -20,6 +22,7 @@ const workflow = JSON.parse(fs.readFileSync(workflowPath, 'utf-8'));
 class WorkflowEngine {
   constructor() {
     this.workflow = workflow.workflow;
+    this.optimizerRoleConfig = getRoleConfig(AI_ROLES.OPTIMIZER);
     this.nodes = new Map();
     this.workflow.nodes.forEach(node => {
       this.nodes.set(node.id, node);
@@ -110,9 +113,13 @@ class WorkflowEngine {
         executionContext.lastResult = result;
         executionContext.allResults.push(result); // Store for response extraction
 
-        // Track detected language in execution context (if not already set)
-        if (result.data?.language && !executionContext.language) {
-          executionContext.language = result.data.language;
+        // Track language, but never overwrite a locked language.
+        if (result.data?.language) {
+          if (!executionContext.language) {
+            executionContext.language = result.data.language;
+          } else if (!executionContext.languageLocked) {
+            executionContext.language = result.data.language;
+          }
         }
         if (result.data?.intent) {
           executionContext.lastIntent = result.data.intent;
@@ -244,6 +251,9 @@ class WorkflowEngine {
       
       case 'model_details':
         return await this.handleModelDetails(node, context);
+
+      case 'selection_clarify':
+        return this.handleSelectionClarify(node, context);
       
       default:
         return { data: context.lastResult?.data, tokensUsed: 0 };
@@ -251,7 +261,29 @@ class WorkflowEngine {
   }
 
   /**
-   * Resolve user selection (number or name) to a product from lastShownProducts or by DB lookup; return full details or "we don't have this model".
+   * Return a fixed clarification line when numbered pick could not be mapped to any list.
+   */
+  handleSelectionClarify(node, context) {
+    const entities = context.lastResult?.data?.entities || context.entities || {};
+    const msg =
+      entities.message ||
+      entities.clarification_message ||
+      'Could you clarify which option you mean?';
+    return {
+      data: {
+        finalResponse: msg,
+        formatted: msg,
+        response: msg,
+        optimized: msg,
+        intent: 'clarify_selection',
+      },
+      tokensUsed: 0,
+      next: node.config?.next || 'response_optimizer',
+    };
+  }
+
+  /**
+   * Resolve user selection (number or name) to a product from option ledger, lastShownProducts, or DB lookup; return full details or "we don't have this model".
    */
   async handleModelDetails(node, context) {
     const templateKey = node.config.template || 'model_detail_full';
@@ -263,12 +295,16 @@ class WorkflowEngine {
     // selected_index can come from router (pass-through) or from NLP result in allResults
     let selectedIndex = entities.selected_index;
     if (!Number.isInteger(selectedIndex) && context.allResults?.length) {
-      const nlpResult = context.allResults.find(r => r.data?.intent === 'model_selection' && r.data?.entities?.selected_index != null);
+      const nlpResult = context.allResults.find(
+        r =>
+          r.data?.intent === 'model_selection' &&
+          (r.data?.entities?.selected_index != null || r.data?.entities?.selected_id != null),
+      );
       selectedIndex = nlpResult?.data?.entities?.selected_index;
     }
 
-    let product = null;
-    if (lastShown && Array.isArray(lastShown) && lastShown.length > 0) {
+    let product = resolveProductFromLedger(context, entities);
+    if (!product && lastShown && Array.isArray(lastShown) && lastShown.length > 0) {
       const idx = selectedIndex;
       if (Number.isInteger(idx) && idx >= 1 && idx <= lastShown.length) {
         product = lastShown[idx - 1];
@@ -495,6 +531,7 @@ class WorkflowEngine {
       model: node.config?.model,
       temperature: node.config?.temperature,
       max_tokens: node.config?.max_tokens,
+      config: node.config, // Pass full config for intents/entities/system_prompt
     });
     const tokensUsed = plan.tokensUsed ?? 0;
     context.entities = { ...(context.entities || {}), ...(plan.entities || {}) };
@@ -528,32 +565,74 @@ class WorkflowEngine {
   }
 
   /**
-   * AnalysisRouter: route by intent from analysis plan.
-   * When user already gave a model/brand, go to bike_search first to check we have it.
-   * When user only gave budget (no model/brand) this turn, go to bike_search in budget_only mode.
+   * AnalysisRouter: slot-based routing that works for any product domain.
+   * Priority: Intent-based routing (from workflow.json) → Slot-based routing (only for recommendation intents) → Default routing
+   * Generic and profile-agnostic - reads search node ID from workflow config.
    */
   handleAnalysisRouter(node, context) {
     const result = LanguageAgent.handleRouter(node, context);
     const intent = result.data?.intent;
 
+    // Get search node ID from config (defaults to 'bike_search' for backward compatibility)
+    const searchNodeId = node.config?.search_node_id || 'bike_search';
+    const recommendationIntents = node.config?.recommendation_intents || ['product_recommendation', 'bike_recommendation'];
+    const areaQuestionIntents = node.config?.area_question_intents || ['area_question'];
+    
     // Prefer entities from this turn (from AnalysisAgent) over merged history
     const turnEntities =
       context.lastResult?.data?.entitiesForTurn ||
       result.data?.entities ||
       {};
 
-    const hasBudget =
-      !!(turnEntities.budget || turnEntities.price);
-    const hasBrand =
-      !!(turnEntities.brand && String(turnEntities.brand).trim());
-    const hasModel =
-      !!(turnEntities.model && String(turnEntities.model).trim());
+    // Generic slot detection (works for any domain)
+    const hasBudget = !!(turnEntities.budget || turnEntities.price || turnEntities.price_range);
+    const hasBrand = !!(turnEntities.brand && String(turnEntities.brand).trim());
+    const hasModel = !!(turnEntities.model && String(turnEntities.model).trim());
+    const hasArea = !!(turnEntities.area || turnEntities.location);
+    const hasProductType = !!(turnEntities.product_type || turnEntities.category);
 
-    // 1) Budget-only: user gave budget but NO model/brand in this turn.
-    if (intent === 'bike_recommendation' && hasBudget && !hasBrand && !hasModel) {
+    // Check intent type
+    const isRecommendationIntent = recommendationIntents.includes(intent);
+    const isAreaQuestionIntent = areaQuestionIntents.includes(intent);
+
+    // PRIORITY 1: Respect intent-based routing from workflow.json first
+    // If LanguageAgent.handleRouter already found a route (result.next exists), use it
+    // UNLESS it's a recommendation intent that needs slot-based enhancement
+    if (result.next && !isRecommendationIntent) {
+      // For non-recommendation intents (like area_question, budget_question, etc.),
+      // respect the workflow.json route (e.g. area_question → area_handler)
+      if (process.env.DEBUG === 'true') {
+        console.log(`   [AnalysisRouter] Using intent-based route: ${intent} → ${result.next}`);
+      }
+      return result;
+    }
+
+    // PRIORITY 2: Slot-based routing ONLY for recommendation/search intents
+    // This enhances recommendation intents based on what slots are filled
+    
+    // 0) Area-only with recommendation intent: user gave area/location → search with area context
+    // BUT: Only if intent is actually a recommendation/search intent, not area_question
+    if (isRecommendationIntent && hasArea && !hasBudget && !hasModel && !hasBrand) {
+      // Merge area entity into context for search
+      context.entities = { ...(context.entities || {}), ...turnEntities };
+      if (process.env.DEBUG === 'true') {
+        console.log(`   [AnalysisRouter] Area-only recommendation → ${searchNodeId} with area context`, turnEntities);
+      }
+      return {
+        ...result,
+        data: {
+          ...result.data,
+          entities: context.entities,
+        },
+        next: searchNodeId,
+      };
+    }
+
+    // 1) Budget-only: user gave budget but NO model/brand in this turn → search with budget filter
+    if (isRecommendationIntent && hasBudget && !hasBrand && !hasModel) {
       context.searchType = 'budget_only';
       if (process.env.DEBUG === 'true') {
-        console.log('   [AnalysisRouter] Budget-only bike_recommendation → bike_search (budget_only)', turnEntities);
+        console.log(`   [AnalysisRouter] Budget-only ${intent} → ${searchNodeId} (budget_only)`, turnEntities);
       }
       return {
         ...result,
@@ -561,20 +640,21 @@ class WorkflowEngine {
           ...result.data,
           searchType: 'budget_only',
         },
-        next: 'bike_search',
+        next: searchNodeId,
       };
     }
 
-    // 2) Model/brand present in this turn → model/brand-first search
-    const hasModelOrBrand = hasBrand || hasModel;
-    if (intent === 'bike_recommendation' && hasModelOrBrand) {
+    // 2) Model/brand/product_type present in this turn → search with model/brand filter
+    const hasModelOrBrandOrType = hasBrand || hasModel || hasProductType;
+    if (isRecommendationIntent && hasModelOrBrandOrType) {
       if (process.env.DEBUG === 'true') {
-        console.log('   [AnalysisRouter] User gave model/brand this turn → bike_search first', turnEntities);
+        console.log(`   [AnalysisRouter] User gave model/brand/type this turn → ${searchNodeId} first`, turnEntities);
       }
-      return { ...result, next: 'bike_search' };
+      return { ...result, next: searchNodeId };
     }
 
-    // 3) Fall back to default routing
+    // PRIORITY 3: Fall back to default routing from workflow.json
+    // This handles cases where LanguageAgent.handleRouter found a route but we didn't override it
     return result;
   }
 
@@ -716,7 +796,8 @@ class WorkflowEngine {
         const availableBrands = Array.isArray(d.availableBrands) ? d.availableBrands.join(', ') : '';
         const lang = context.language || 'english';
         const templates = this.workflow.templates?.brand_not_available;
-        let message = templates?.[lang] || templates?.english || `Sorry, we don't have *${brand}* in our inventory. We have: ${availableBrands}. Which brand are you interested in?`;
+        const noResultsTemplates = this.workflow.templates?.no_results;
+        let message = templates?.[lang] || templates?.english || noResultsTemplates?.[lang] || noResultsTemplates?.english || '';
         message = message.replace(/\{brand\}/g, brand).replace(/\{available_brands\}/g, availableBrands);
         if (process.env.DEBUG === 'true') console.log('[Workflow] Brand unavailable response:', brand, availableBrands);
         return {
@@ -746,7 +827,13 @@ class WorkflowEngine {
         }
       }
       try {
-        const systemPrompt = node.config.system_prompt;
+        const lockedLanguage = context.language || context.metadata?.language || 'english';
+        const systemPrompt = [
+          `MANDATORY LANGUAGE POLICY: Output ONLY in ${lockedLanguage}.`,
+          'Never switch language based on user input language.',
+          'If user writes in another language, still reply in the locked conversation language.',
+          node.config.system_prompt,
+        ].join('\n\n');
         let userContent = typeof userQuery === 'string' ? userQuery : String(context.user_message || '');
         if (node.id === 'no_results_handler' && lastResult) {
           const searchInfo = lastResult.entities || context.metadata?.entities || {};
@@ -755,14 +842,15 @@ class WorkflowEngine {
         if (node.id === 'clarification_handler' && context.lastIntent) {
           userContent = `Last intent: ${context.lastIntent}. User message: "${userContent}". What is missing: budget, area, or model? Ask for ONE thing in a friendly way.`;
         }
+        const roleCfg = this.optimizerRoleConfig;
         const completion = await openai.chat.completions.create({
-          model: node.config.model || 'gpt-4o-mini',
+          model: node.config.model || roleCfg.model,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userContent },
           ],
-          temperature: node.config.temperature ?? 0.3,
-          max_tokens: node.config.max_tokens || 200,
+          temperature: node.config.temperature ?? roleCfg.temperature,
+          max_tokens: node.config.max_tokens || roleCfg.maxTokens,
           response_format: { type: 'json_object' },
         });
         const content = JSON.parse(completion.choices[0].message.content);
@@ -775,9 +863,11 @@ class WorkflowEngine {
       } catch (err) {
         console.error('ML node error (', node.id, '):', err.message);
         const lang = context.language || 'english';
+        const noResultsTemplates = this.workflow.templates?.no_results;
+        const clarificationTemplates = this.workflow.templates?.clarification_questions;
         const fallback = node.id === 'no_results_handler'
-          ? { message: "Sorry, we don't have that right now. Would you like to try a different budget or area?" }
-          : { clarification_message: "To recommend the best bikes, please share your budget (e.g. RM 5,000), area (e.g. Puchong), and preferred model if any." };
+          ? { message: noResultsTemplates?.[lang] || noResultsTemplates?.english || '' }
+          : { clarification_message: clarificationTemplates?.[lang] || clarificationTemplates?.english || '' };
         return {
           data: fallback,
           tokensUsed: 0,

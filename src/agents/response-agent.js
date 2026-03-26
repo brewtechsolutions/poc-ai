@@ -1,4 +1,5 @@
 import openai, { TOKEN_CONFIG } from '../config/openai.js';
+import { AI_ROLES, getRoleConfig } from '../config/ai-registry.js';
 import { getLatestEntitiesFromContext } from '../utils/entities.js';
 import { productMatchesRequestedModel } from '../utils/products.js';
 
@@ -8,6 +9,68 @@ import { productMatchesRequestedModel } from '../utils/products.js';
  * Keeps WorkflowEngine focused on orchestration.
  */
 class ResponseAgent {
+  /**
+   * Remove parentheses around user-provided entity values.
+   * This avoids needing per-node prompt hardcoding (works for any node that echoes entities).
+   */
+  static sanitizeUserValueParentheses(response, entities) {
+    if (typeof response !== 'string' || !response) return response;
+
+    const escapeRegExp = (s) =>
+      String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    const buildFlexibleValuePattern = (val) => {
+      const parts = String(val)
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .map(escapeRegExp);
+      return parts.join('\\s+');
+    };
+
+    const e = entities || {};
+    const out = response;
+
+    let result = out;
+
+    // Budget is often formatted as "RM5000" / "RM 5,000" inside parentheses.
+    const hasAnyBudget = !!(e.budget || e.budget_min || e.budget_max || e.price_range);
+    if (hasAnyBudget) {
+      // Remove parentheses that wrap RM numbers.
+      result = result.replace(
+        /[\(\（]\s*(RM\s*[0-9][0-9,\s]*)\s*[\)\）]/gi,
+        '$1',
+      );
+    }
+
+    // Exact value matches for non-budget fields.
+    const valueKeys = ['area', 'location', 'model', 'brand'];
+    for (const key of valueKeys) {
+      const val = e[key];
+      if (typeof val !== 'string') continue;
+      const trimmed = val.trim();
+      if (!trimmed) continue;
+
+      const valuePattern = buildFlexibleValuePattern(trimmed);
+      // Capture the matched inner text so we preserve original casing/spacing.
+      const re = new RegExp(`[\\(（]\\s*(${valuePattern})\\s*[\\)）]`, 'gi');
+      result = result.replace(re, '$1');
+    }
+
+    return result;
+  }
+
+  static resolveLanguage(context, workflow, nodeConfig = {}) {
+    return (
+      context.language ||
+      context.metadata?.language ||
+      nodeConfig.default_language ||
+      workflow?.default_language ||
+      workflow?.config?.default_language ||
+      'english'
+    );
+  }
+
 
   /** Formatter nodes: build WhatsApp-friendly text from templates and products. */
   static handleFormatter(node, context, workflow) {
@@ -15,7 +78,7 @@ class ResponseAgent {
     const templateKey = node.config.template;
     const lastIntent = context.lastIntent || context.lastResult?.data?.intent;
     // Language is locked to context.language once chosen
-    const language = context.language || 'english';
+    const language = this.resolveLanguage(context, workflow, node.config);
     const entities = getLatestEntitiesFromContext(context);
     const modelPart = (entities.model || '').trim();
     const brandPart = (entities.brand || '').trim();
@@ -152,22 +215,35 @@ class ResponseAgent {
       };
     }
 
-    const lang = context.language || 'english';
-    const base = `You must respond ONLY in ${lang}. Never switch languages. Always use MYR or RM for prices (Malaysian Ringgit). Never use $ or USD.`;
+    const lockedLanguage = this.resolveLanguage(context, null, node.config);
+    const fixedLanguagePolicy = [
+      `MANDATORY LANGUAGE POLICY: Output ONLY in ${lockedLanguage}.`,
+      `Never switch to another language even if the user message uses another language.`,
+      `If needed, translate the content into ${lockedLanguage} while preserving meaning.`,
+    ].join(' ');
+    const basePrompt =
+      node.config.system_prompt ||
+      'You are a friendly sales assistant. Rewrite the reply to sound natural, clear and concise.';
     const systemPrompt =
-      `${base}\n\n` +
-      (node.config.system_prompt ||
-        'You are a friendly sales assistant. Rewrite the reply to sound natural, clear and concise.');
+      node.config.language_policy_prompt
+        ? `${fixedLanguagePolicy}\n\n${node.config.language_policy_prompt}\n\n${basePrompt}`.trim()
+        : `${fixedLanguagePolicy}\n\n${basePrompt}`.trim();
 
     try {
+      // Get config from registry (can be overridden by node.config)
+      const roleConfig = getRoleConfig(AI_ROLES.OPTIMIZER);
+      const model = node.config.model || roleConfig.model;
+      const temperature = node.config.temperature ?? roleConfig.temperature;
+      const maxTokens = node.config.max_tokens || roleConfig.maxTokens;
+
       const completion = await openai.chat.completions.create({
-        model: node.config.model || 'gpt-4o-mini',
+        model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: response },
         ],
-        temperature: node.config.temperature ?? TOKEN_CONFIG.TEMPERATURE.STRICT,
-        max_tokens: node.config.max_tokens || 600,
+        temperature,
+        max_tokens: maxTokens,
       });
 
       const optimized = (completion.choices[0].message.content || '').trim();
@@ -182,7 +258,8 @@ class ResponseAgent {
       console.error('[Optimizer] Error optimizing response:', error.message);
       let fallback = response.replace(/\n{3,}/g, '\n\n').trim();
       const estimatedTokens = Math.ceil(fallback.length / 4);
-      const maxTokens = node.config.max_tokens || 600;
+      const roleConfig = getRoleConfig(AI_ROLES.OPTIMIZER);
+      const maxTokens = node.config.max_tokens || roleConfig.maxTokens;
       if (estimatedTokens > maxTokens) {
         fallback = `${fallback.substring(0, maxTokens * 4)}...`;
       }
@@ -197,7 +274,7 @@ class ResponseAgent {
   static handleHandler(node, context, workflow) {
     const templateKey = node.config.template;
     // Always respect the conversation language once set
-    const language = context.language || 'english';
+    const language = this.resolveLanguage(context, workflow, node.config);
 
     let template = '';
     if (typeof workflow.templates[templateKey] === 'object') {
@@ -290,7 +367,7 @@ class ResponseAgent {
     if (!response) {
       const intent = context.lastResult?.data?.intent || 'greeting';
       // Final fallback also sticks to the previously selected conversation language
-      const language = context.language || 'english';
+      const language = this.resolveLanguage(context, workflow, node.config);
       const templateKey = intent === 'greeting' ? 'greeting' : `${intent}_response`;
       let template = '';
 
@@ -312,10 +389,27 @@ class ResponseAgent {
         template = workflow.templates.greeting || '';
       }
 
+      if (!template && typeof workflow.templates?.error_fallback === 'object') {
+        template =
+          workflow.templates.error_fallback[language] ||
+          workflow.templates.error_fallback.english ||
+          '';
+      } else if (!template && workflow.templates?.error_fallback) {
+        template = workflow.templates.error_fallback;
+      }
+
       response =
         template ||
+        node.config.fallback_response ||
         "I apologize, I couldn't process that request. Please try rephrasing your question.";
     }
+
+    // Generic safety: strip parentheses around user-provided entity values
+    // (budget/area/location/model/brand) so user echoes don't show as "(RM5000)".
+    response = this.sanitizeUserValueParentheses(
+      response,
+      context.entities || context.lastResult?.data?.entities || {},
+    );
 
     if (process.env.DEBUG === 'true') {
       console.log(`[Action] Final response: ${response?.substring(0, 100)}...`);

@@ -62,7 +62,51 @@
         "type": "analysis_agent",
         "name": "Analysis Agent",
         "config": {
+          "model": "gpt-4o",
+          "system_prompt": "You are a WhatsApp sales assistant for a Malaysian motorcycle shop.\n\nScope rules (VERY IMPORTANT):\n- You ONLY sell motorcycles and related services.\n- If the user mentions a clearly non-motorcycle brand (e.g. Samsung, Apple, Sony, LG, Dell, Huawei, Xiaomi, Oppo, Vivo, HP, Lenovo, Asus, Nike, Adidas), set intent to out_of_scope immediately.\n- If the user mentions a clearly non-motorcycle product type (e.g. phone, tablet, laptop, PC, computer, TV, fridge, washing machine, shoes, clothes, car, house, property), set intent to out_of_scope immediately.\n- If the message is just a model name that could be a motorcycle (e.g. Y15ZR, RS150R, LC135), treat as product_inquiry.\n- Only set intent to out_of_scope when the user is clearly asking for something outside motorcycles.\n- When in doubt between out_of_scope and product_inquiry, prefer product_inquiry ONLY if the name could plausibly be a motorcycle model.\n\nTest ride intent rules (VERY IMPORTANT):\n- test_ride_request: use this when the user wants to arrange or book a test ride but has NOT confirmed they are ready yet. Phrases that map to this intent: \"预约\", \"试驾\", \"预约试驾\", \"test ride\", \"arrange test ride\", \"book test ride\", \"ujian memandu\", \"nak test ride\", \"want to test ride\". ALWAYS use test_ride_request first — never skip to test_ride_booking on the first mention of a test ride.\n- test_ride_booking: ONLY use this when the user explicitly confirms they are ready to proceed AFTER already seeing the deposit information. Phrases that map to this intent: \"i am ready\", \"i'm ready\", \"im ready\", \"ready\", \"sedia\", \"dah ready\", \"准备好了\", \"好了\", \"我准备好了\". Do NOT classify \"预约\" or \"试驾\" alone as test_ride_booking.\n\nUse the skills below to classify the message and extract entities for routing. Always call the tool classify_message and fill its schema accurately.",
+          "intents": [
+            "greeting",
+            "product_recommendation",
+            "product_inquiry",
+            "more_options",
+            "model_selection",
+            "clarify_selection",
+            "more_details",
+            "price_inquiry",
+            "budget_question",
+            "area_question",
+            "model_question",
+            "specification_question",
+            "test_ride_request",
+            "test_ride_booking",
+            "financing_question",
+            "trade_in_question",
+            "agent_request",
+            "goodbye",
+            "out_of_scope"
+          ],
+          "entities": [
+            { "name": "budget", "type": "string" },
+            { "name": "budget_min", "type": "string" },
+            { "name": "budget_max", "type": "string" },
+            { "name": "price_range", "type": "string" },
+            { "name": "area", "type": "string" },
+            { "name": "location", "type": "string" },
+            { "name": "model", "type": "string" },
+            { "name": "brand", "type": "string" },
+            { "name": "product_type", "type": "string" },
+            { "name": "selected_index", "type": "integer" }
+          ],
+          "languages": ["english", "malay", "chinese"],
+          "fallback_intent": "product_recommendation",
+          "history_window": 6,
+          "missing_slots": [
+            "budget",
+            "area",
+            "model"
+          ],
           "active_skills": [
+            "out_of_scope_detector",
             "consultative_selling",
             "budget_intelligence",
             "local_market_expert",
@@ -72,6 +116,38 @@
             "financing_advisor",
             "trade_in_specialist"
           ],
+          "skills": [
+            {
+              "name": "out_of_scope_detector",
+              "prompt": "## Skill: Out-of-Scope Detector\n- IMMEDIATELY set intent to out_of_scope (confidence 0.99) if the user mentions ANY of these:\n  - Electronics brands: Samsung, Apple, iPhone, iPad, Sony, LG, Huawei, Xiaomi, Oppo, Vivo, Realme, OnePlus, Google Pixel, Dell, HP, Lenovo, Asus, Acer\n  - Product types: phone, smartphone, tablet, laptop, notebook, PC, computer, monitor, TV, television, fridge, refrigerator, washing machine, air conditioner, aircon\n  - Other categories: shoes, sneakers, clothes, clothing, car, SUV, truck, house, property, condo, apartment\n  - Landmarks, buildings, or real estate: KLCC, Petronas Tower, KL Tower, Menara KL, Burj Khalifa, Eiffel Tower, or ANY famous building, landmark, monument, or tourist attraction - these are NEVER motorcycles regardless of how the user phrases it.\n- When setting out_of_scope, also extract entities.product_type as the specific product name from the user's message (e.g. 'KLCC', 'KL Tower', 'Samsung Galaxy Tab S11 Ultra', 'iPhone 15', 'laptop').\n- Do NOT ask a follow-up question for out_of_scope; just classify and move on.\n- Samsung Tab, iPhone, iPad, MacBook, Galaxy are NEVER motorcycles regardless of model number."
+            },
+            {
+              "name": "local_market_expert",
+              "prompt": "## Skill: Local Market Expert\n- Extract area/location from ANY location name mentioned: \"Puchong\", \"KL\", \"JB\", \"Penang\", \"Kota Kinabalu\", \"Shah Alam\", \"Indonesia\", \"Singapore\", \"Jakarta\", \"我住Puchong\", \"area Shah Alam\", etc.\n- Set entities.area and entities.location when a location is detected.\n- IMPORTANT: If the user is TELLING their location (e.g. '我住在puchong', '我在KL', '我住KL', 'i stay in Subang', 'i am in PJ', 'i live in Cheras', 'staying in Klang', 'based in Shah Alam', 'saya di Puchong', 'saya tinggal di JB'), set intent to bike_recommendation and extract the location as entities.area and entities.location. Do NOT set area_question — the user is giving you information, not asking a question.\n- area_question is ONLY for when the user is ASKING about an area or availability with no location provided (e.g. 'what areas do you cover?', 'do you have showrooms in KL?').\n- IMPORTANT: Famous landmarks and buildings (KLCC, KL Tower, Petronas Tower, Menara KL, Burj Khalifa, Eiffel Tower, or any world-famous tourist attraction) are NOT bike search locations — if the user wants to buy them, defer to out_of_scope_detector. Do NOT extract them as entities.area or entities.location.\n- Never use a landmark or building name as a location filter for bike search."
+            },
+            {
+              "name": "budget_intelligence",
+              "prompt": "## Skill: Budget Intelligence\n- 'more than', 'above', 'at least', 'minimum', 'from', 'starting from' -> set entities.budget_min only. Do NOT set budget or budget_max.\n- 'below', 'under', 'max', 'less than', 'up to', 'not more than' -> set entities.budget_max only. Do NOT set budget or budget_min.\n- 'around', 'about', 'budget X', just a plain number or range like 5k -> set entities.budget only.\n- 'RM5000 to RM8000', 'between 5k and 8k', '5k-8k' -> set both budget_min and budget_max. Do NOT set budget.\n- Extract digits only (no RM symbol, no commas). '10k' -> '10000', 'RM 8,500' -> '8500'.\n- Never guess direction - if unclear, use entities.budget."
+            }
+          ],
+          "fast_path_rules": [
+            {
+              "pattern": "^(hi|hello|hey|halo|hai|你好|您好|嗨)$",
+              "flags": "i",
+              "intent": "greeting"
+            },
+            {
+              "pattern": "\\\\bagent\\\\b|客服|找客服|真人|人工|转人工|talk to (a )?human",
+              "flags": "i",
+              "intent": "agent_request"
+            },
+            {
+              "pattern": "bye|goodbye|see you|exit|quit|再见|拜拜|selamat tinggal",
+              "flags": "i",
+              "intent": "goodbye",
+              "maxLength": 30
+            }
+          ],
           "next": "analysis_router"
         }
       },
@@ -80,6 +156,9 @@
         "type": "analysis_router",
         "name": "Analysis Router",
         "config": {
+          "search_node_id": "bike_search",
+          "recommendation_intents": ["product_recommendation", "bike_recommendation"],
+          "area_question_intents": ["area_question"],
           "routes": [
             { "intent": "greeting", "next": "greeting_handler" },
             { "intent": "inquire_about_motorcycle", "next": "bike_search" },
@@ -89,6 +168,7 @@
             { "intent": "more_options", "next": "bike_search" },
             { "intent": "more_details", "next": "more_details_handler" },
             { "intent": "model_selection", "next": "model_details_handler" },
+            { "intent": "clarify_selection", "next": "selection_clarify_handler" },
             { "intent": "price_inquiry", "next": "price_lookup" },
             { "intent": "budget_question", "next": "budget_handler" },
             { "intent": "area_question", "next": "area_handler" },
@@ -100,7 +180,11 @@
             { "intent": "trade_in_question", "next": "trade_in_handler" },
             { "intent": "agent_request", "next": "agent_escalation" },
             { "intent": "complaint", "next": "agent_escalation" },
-            { "intent": "goodbye", "next": "goodbye_handler" }
+            { "intent": "goodbye", "next": "goodbye_handler" },
+            {
+              "intent": "out_of_scope",
+              "next": "out_of_scope_handler"
+            }
           ],
           "fallback": "clarification_handler"
         }
@@ -113,7 +197,7 @@
           "model": "gpt-4o-mini",
           "temperature": 0.2,
           "max_tokens": 200,
-          "system_prompt": "You are a motorcycle sales assistant. Detect the language (Malay, Chinese, English) and extract intent from the user message. If the user replies with only budget, area/location and maybe model (e.g. \"RM 5,000, Puchong, Yamaha Ego S\"), classify as bike_recommendation and fill entities. If the user asks for other options, more bikes, alternatives, or \"got others?\" / \"any others?\" / \"show more\", classify as more_options. If the user asks for more detail, full specs, or \"tell me more\" about a product, classify as more_details. If the user selects a model by number (1, 2, 3) or by name (e.g. Yamaha Ego S 125), classify as model_selection. Return JSON with: language (malay/chinese/english), intent, entities, confidence (0-1), requires_budget_info, requires_area_info, requires_model_info.",
+          "system_prompt": "You are a motorcycle sales assistant. Detect the language (Malay, Chinese, English) and extract intent from the user message. If the user replies with only budget, area/location and maybe model (e.g. \"RM 5,000, AreaName, Preferred Model\"), classify as bike_recommendation and fill entities. If the user asks for other options, more bikes, alternatives, or \"got others?\" / \"any others?\" / \"show more\", classify as more_options. If the user asks for more detail, full specs, or \"tell me more\" about a product, classify as more_details. If the user selects a model by number (1, 2, 3) or by name, classify as model_selection. Return JSON with: language (malay/chinese/english), intent, entities, confidence (0-1), requires_budget_info, requires_area_info, requires_model_info.",
           "extract": {
             "intents": [
               "greeting",
@@ -265,7 +349,7 @@
           "model": "gpt-4o-mini",
           "temperature": 0.3,
           "max_tokens": 300,
-          "system_prompt": "Analyze the user's motorcycle inquiry. Determine what information is missing: budget, area/location, preferred model/brand, bike type (sport, cruiser, scooter, etc), engine size (cc), new/used preference. Return JSON with: missing_info (array), has_budget (boolean), has_area (boolean), has_model (boolean), should_ask_budget (boolean), should_ask_area (boolean), should_ask_model (boolean), reasoning.",
+          "system_prompt": "Analyze the user's product inquiry. Determine what information is missing: budget, area/location, preferred model/brand, product type, specifications, new/used preference. Return JSON with: missing_info (array), has_budget (boolean), has_area (boolean), has_model (boolean), should_ask_budget (boolean), should_ask_area (boolean), should_ask_model (boolean), reasoning.",
           "next_complete": "bike_search",
           "next_missing_info": "smart_question_generator",
           "fallback": "clarification_handler"
@@ -279,7 +363,7 @@
           "model": "gpt-4o-mini",
           "temperature": 0.4,
           "max_tokens": 200,
-          "system_prompt": "You are a motorcycle sales assistant for MotorShop Malaysia. You ONLY sell motorcycles/bikes and related services. Never mention houses, property, cars, or unrelated products. Based on the conversation context and what is still missing (especially budget in RM, area/location like Puchong, and preferred model/brand), generate ONE natural, friendly follow-up question in the user's language (Malay/Chinese/English) that clearly asks for the missing MOTORCYCLE information. Sound like a real Malaysian salesperson chatting on WhatsApp: short sentences, simple words, and warm tone. You can use light particles like 'lah', 'ya', 'meh' when natural in Malay or English, but do not use them in Chinese. Avoid sounding robotic or too formal. Return JSON with: question (string), question_type (budget/area/model/other), language (same as user).",
+          "system_prompt": "You are a sales assistant. Based on the conversation context and what is still missing (especially budget in RM, area/location, and preferred model/brand), generate ONE natural, friendly follow-up question in the user's language (Malay/Chinese/English) that clearly asks for the missing product information. Sound like a real Malaysian salesperson chatting on WhatsApp: short sentences, simple words, and warm tone. You can use light particles like 'lah', 'ya', 'meh' when natural in Malay or English, but do not use them in Chinese. Avoid sounding robotic or too formal. Return JSON with: question (string), question_type (budget/area/model/other), language (same as user).",
           "next": "question_formatter"
         }
       },
@@ -323,7 +407,8 @@
           "model": "gpt-4o-mini",
           "temperature": 0.2,
           "max_tokens": 400,
-          "system_prompt": "You are a motorcycle sales analysis agent. Based on the conversation context and the list of candidate products, analyze the user's message (budget, area/location, preferred model/brand, bike type, cc, new/used) and decide which products are the best fit. Consider: budget match, area availability, model preference, specifications, user intent, and popularity. Provide clear sales-focused reasoning. Return JSON with: products (array with id, relevance_score, reasoning), overall_reasoning, confidence.",
+          "system_prompt": "You are a sales analysis agent. Based on the conversation context and the list of candidate products, analyze the user's message (budget, area/location, preferred model/brand, product type, specifications, new/used) and decide which products are the best fit. Consider: budget match, area availability, model preference, specifications, user intent, and popularity. Provide clear sales-focused reasoning. Return JSON with: products (array with id, relevance_score, reasoning), overall_reasoning, confidence.\n\nBudget matching rules (read entities carefully):\n- entities.budget_min is set -> user wants price >= budget_min. Exclude bikes below budget_min. Rank higher-priced bikes as stronger matches.\n- entities.budget_max is set -> user wants price <= budget_max. Exclude bikes above budget_max.\n- entities.budget_min AND budget_max are both set -> user wants price within that range. Exclude bikes outside it.\n- entities.budget is set (no min/max) -> treat as a flexible target. Allow +/-20% variance.\n- If no budget entity is set -> rank by popularity and relevance only.",
+          "product_type_label": "motorcycle",
           "ranking_factors": [
             "budget_match",
             "area_availability",
@@ -390,7 +475,7 @@
         "config": {
           "template": "area_info",
           "language_aware": true,
-          "next": "context_update"
+          "next": "response_optimizer"
         }
       },
       {
@@ -482,7 +567,7 @@
           "model": "gpt-4o-mini",
           "temperature": 0.3,
           "max_tokens": 150,
-          "system_prompt": "You are a motorcycle sales assistant. The user's message was unclear or we need one more detail. Based on the conversation context, last intent, and what is missing (budget, area/location, model/brand, or something else), generate ONE short, friendly clarification question in the user's language (Malay/Chinese/English). Be specific when possible (e.g. 'Just to confirm, is your budget in RM?' or 'You said Puchong – did you mean our Puchong branch?'). Return JSON with: clarification_message (string), language (malay/chinese/english).",
+          "system_prompt": "You are a sales assistant. The user's message was unclear or we need one more detail. Based on the conversation context, last intent, and what is missing (budget, area/location, model/brand, or something else), generate ONE short, friendly clarification question in the user's language (Malay/Chinese/English). Be specific when possible (e.g. 'Just to confirm, is your budget in RM?' or 'You said Puchong – did you mean our Puchong branch?'). IMPORTANT: Do NOT wrap user-provided values (budget, area/location, model/brand) in parentheses. Never output '(' or ')' around those values. Example: write 'your budget RM5000' not 'your budget (RM5000)'. Return JSON with: clarification_message (string), language (malay/chinese/english).",
           "next": "clarification_formatter"
         }
       },
@@ -505,7 +590,7 @@
           "model": "gpt-4o-mini",
           "temperature": 0.3,
           "max_tokens": 250,
-          "system_prompt": "You are a motorcycle sales assistant. The user's search returned no results. Use the context: what they asked for (budget, area, model), and why nothing matched. Write a short, helpful response in the user's language (Malay/Chinese/English) that: 1) Briefly explains why there were no results (e.g. no bikes in that budget in that area, or we don't have that model). 2) Suggests 2–3 concrete next steps (e.g. try a different budget/area, ask for similar models we have). 3) Offers to connect them with the team if they want. Keep it concise and friendly. Return JSON with: message (string, the full response).",
+          "system_prompt": "You are a motorcycle sales assistant. The user's search returned no results.\n\nIMPORTANT: If the user was asking about a non-motorcycle product (phone, tablet, laptop, electronics, etc.), do NOT suggest motorcycles as alternatives. Instead, politely explain we only sell motorcycles and invite them to ask about bikes.\n\nIMPORTANT: Do NOT wrap user-provided values (budget, area/location, model/brand) in parentheses. Never output '(' or ')' around those values. Example: write 'budget RM5000' not 'budget (RM5000)'.\n\nIf the user WAS asking about a motorcycle that we don't have:\n1. Briefly explain why there were no results (wrong budget/area, model not in stock).\n2. Suggest 2-3 concrete next steps (try different budget/area, ask for similar models).\n3. Offer to connect them with the team.\n\nReturn JSON with: message (string), was_out_of_scope (boolean).",
           "next": "no_results_formatter"
         }
       },
@@ -527,6 +612,14 @@
         "config": {
           "template": "more_details_prompt",
           "language_aware": true,
+          "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "selection_clarify_handler",
+        "type": "selection_clarify",
+        "name": "Selection Clarify",
+        "config": {
           "next": "response_optimizer"
         }
       },
@@ -639,12 +732,21 @@
         }
       },
       {
+        "id": "out_of_scope_handler",
+        "type": "handler",
+        "name": "Out of Scope Handler",
+        "config": {
+          "template": "out_of_scope",
+          "next": "response_optimizer"
+        }
+      },
+      {
         "id": "response_optimizer",
         "type": "optimizer",
         "name": "Response Token Optimizer",
         "config": {
           "model": "gpt-4o-mini",
-          "temperature": 0.2,
+          "temperature": 0.55,
           "max_tokens": 600,
           "optimize_for": "whatsapp",
           "remove_redundancy": true,
@@ -691,10 +793,15 @@
         "malay": "Hai! 👋\n\nBeritahu saya bahasa mana yang anda lebih selesa guna ya?\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\nAnda boleh balas dengan 1, 2, atau 3 sahaja.",
         "chinese": "嗨～👋\n\n跟我说你比较习惯用哪一种语言：\n\n1️⃣ English\n2️⃣ Bahasa Melayu\n3️⃣ 中文\n\n直接回复 1、2 或 3 就可以了。"
       },
+      "out_of_scope": {
+        "english": "Hmm, looks like that's not a motorcycle! 😄 We only sell bikes here. If you're looking for one, just tell me your budget and area and I'll help you find the perfect ride.",
+        "malay": "Hmm, nampaknya itu bukan motosikal! 😄 Kami hanya jual motor je. Kalau nak cari motor, bagitahu bajet dan kawasan anda.",
+        "chinese": "看来那不是摩托车！😄 我们这里只卖摩托车。如果你想找摩托，告诉我预算和地区，我来帮你。"
+      },
       "greeting": {
-        "english": "Hello! 👋 Welcome to MotorShop! I'm your AI motorcycle assistant. I can help you find the perfect bike based on your budget, location, and preferences.\n\nTo get started, please reply with:\n1. Budget (RM) – e.g. RM 5,000 – RM 8,000\n2. Area / Location – e.g. Puchong, PJ, KL\n3. Preferred model / brand (optional) – e.g. Yamaha Ego S, Honda\n\nAnswer in one line, for example: RM 5,000, Puchong, Yamaha Ego S",
-        "malay": "Hello! 👋 Selamat datang ke MotorShop! Saya pembantu AI motosikal anda. Saya boleh membantu anda mencari motosikal yang sesuai berdasarkan bajet, lokasi, dan pilihan anda.\n\nUntuk bermula, sila balas dengan:\n1. Bajet (RM) – cth. RM 5,000 – RM 8,000\n2. Kawasan / Lokasi – cth. Puchong, PJ, KL\n3. Model / jenama pilihan (pilihan) – cth. Yamaha Ego S, Honda\n\nJawab dalam satu baris, contoh: RM 5,000, Puchong, Yamaha Ego S",
-        "chinese": "你好！👋 欢迎来到MotorShop！我是您的AI摩托车助手。我可以根据您的预算、位置和偏好帮您找到完美的摩托车。\n\n请按下面回复：\n1. 预算（RM）– 例如：RM 5,000 – RM 8,000\n2. 地区 / 位置 – 例如：Puchong、PJ、KL\n3. 偏好的车型 / 品牌（可选）– 例如：Yamaha Ego S、Honda\n\n请一行回复，例如：RM 5,000，Puchong，Yamaha Ego S"
+        "english": "Hello! 👋 Welcome to MotorShop! I'm your AI motorcycle assistant. I can help you find the perfect bike based on your budget, location, and preferences.\n\nTo get started, please reply with:\n1. Budget (RM) – e.g. RM 5,000 – RM 8,000\n2. Area / Location – e.g. Puchong, PJ, KL\n3. Preferred model / brand (optional)\n\nAnswer in one line, for example: RM 5,000, Puchong, any 150cc sporty model",
+        "malay": "Hello! 👋 Selamat datang ke MotorShop! Saya pembantu AI motosikal anda. Saya boleh membantu anda mencari motosikal yang sesuai berdasarkan bajet, lokasi, dan pilihan anda.\n\nUntuk bermula, sila balas dengan:\n1. Bajet (RM) – cth. RM 5,000 – RM 8,000\n2. Kawasan / Lokasi – cth. Puchong, PJ, KL\n3. Model / jenama pilihan (pilihan)\n\nJawab dalam satu baris, contoh: RM 5,000, Puchong, nak motosikal 150cc yang sporty",
+        "chinese": "你好！👋 欢迎来到MotorShop！我是您的AI摩托车助手。我可以根据您的预算、位置和偏好帮您找到合适的摩托车。\n\n请按下面回复：\n1. 预算（RM）– 例如：RM 5,000 – RM 8,000\n2. 地区 / 位置 – 例如：Puchong、PJ、KL\n3. 偏好的车型 / 品牌（可选）\n\n请一行回复，例如：RM 5,000，Puchong，要一辆150cc偏运动的摩托"
       },
       "greeting_response": {
         "english": "Hi there! I'm here to help you find your dream motorcycle. What type of bike are you looking for?",
@@ -742,9 +849,9 @@
         "chinese": "抱歉，我们没有这款型号。您想看看我们其他的摩托车吗？"
       },
       "clarification_questions": {
-        "english": "To give you the best recommendations, please reply with these items (you can answer in one line):\n\n1) **Budget (RM)** – e.g. RM 5,000 – RM 8,000\n2) **Area / Location** – e.g. Puchong, PJ, KL\n3) **Preferred model / brand (optional)** – e.g. Yamaha Ego S, Honda\n\nExample reply:\nRM 5,000, Puchong, Yamaha Ego S",
-        "malay": "Untuk saya cadangkan motosikal terbaik, sila balas dengan maklumat berikut (boleh jawab dalam satu baris sahaja):\n\n1) **Bajet (RM)** – cth: RM 5,000 – RM 8,000\n2) **Kawasan / Lokasi** – cth: Puchong, PJ, KL\n3) **Model / jenama pilihan (pilihan sahaja)** – cth: Yamaha Ego S, Honda\n\nContoh balasan:\nRM 5,000, Puchong, Yamaha Ego S",
-        "chinese": "为了给您最合适的推荐，请按下面这样回复（可以一行写完）：\n\n1) **预算（RM）** – 例如：RM 5,000 – RM 8,000\n2) **地区 / 位置** – 例如：Puchong、PJ、KL\n3) **偏好的车型 / 品牌（可选）** – 例如：Yamaha Ego S、Honda\n\n示例回复：\nRM 5,000，Puchong，Yamaha Ego S"
+        "english": "To give you the best recommendations, please reply with these items (you can answer in one line):\n\n1) **Budget (RM)** – e.g. RM 5,000 – RM 8,000\n2) **Area / Location** – e.g. Puchong, PJ, KL\n3) **Preferred model / brand (optional)** – e.g. any 150cc scooter / kapcai you like\n\nExample reply:\nRM 5,000, Puchong, 150cc scooter",
+        "malay": "Untuk saya cadangkan motosikal terbaik, sila balas dengan maklumat berikut (boleh jawab dalam satu baris sahaja):\n\n1) **Bajet (RM)** – cth: RM 5,000 – RM 8,000\n2) **Kawasan / Lokasi** – cth: Puchong, PJ, KL\n3) **Model / jenama pilihan (pilihan sahaja)** – cth: mana-mana skuter / kapcai 150cc yang anda suka\n\nContoh balasan:\nRM 5,000, Puchong, skuter 150cc",
+        "chinese": "为了给您最合适的推荐，请按下面这样回复（可以一行写完）：\n\n1) **预算（RM）** – 例如：RM 5,000 – RM 8,000\n2) **地区 / 位置** – 例如：Puchong、PJ、KL\n3) **偏好的车型 / 品牌（可选）** – 例如：你喜欢的任何150cc踏板车 / 骑士车\n\n示例回复：\nRM 5,000，Puchong，150cc踏板车"
       },
       "clarification_dynamic": {
         "english": "{clarification_message}",
