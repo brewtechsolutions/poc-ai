@@ -1,6 +1,6 @@
 import express from 'express';
 import WorkflowEngine from '../core/workflow-engine.js';
-import prisma from '../config/database.js';
+import { appendOptionSet } from '../utils/session-option-sets.js';
 
 const router = express.Router();
 
@@ -42,9 +42,14 @@ router.post('/api/test-chat', async (req, res) => {
         hasAskedModel: false,
         skipAlreadyShownIds: [],
         salesInsights: [],
+        optionSets: [],
+        activeSetId: null,
+        turnCount: 0,
       };
       sessions.set(currentSessionId, session);
     }
+
+    session.turnCount = (session.turnCount ?? 0) + 1;
 
     // Add user message to session
     const userMessage = {
@@ -65,6 +70,8 @@ router.post('/api/test-chat', async (req, res) => {
       conversation_id: currentSessionId,
       entities: session.lastEntities,
       lastShownProducts: session.lastShownProducts,
+      optionSets: session.optionSets ?? [],
+      activeSetId: session.activeSetId ?? null,
       hasAskedBudget: session.hasAskedBudget || false,
       hasAskedArea: session.hasAskedArea || false,
       hasAskedModel: session.hasAskedModel || false,
@@ -76,6 +83,8 @@ router.post('/api/test-chat', async (req, res) => {
         language: session.language,
         entities: session.lastEntities,
         lastShownProducts: session.lastShownProducts,
+        optionSets: session.optionSets ?? [],
+        activeSetId: session.activeSetId ?? null,
       },
       conversationHistory: session.messages.slice(-5).map(m => ({
         role: m.type === 'user' ? 'user' : 'assistant',
@@ -132,9 +141,13 @@ router.post('/api/test-chat', async (req, res) => {
     if (Object.keys(merged).length > 0) {
       session.lastEntities = merged;
     }
-    // Persist last shown products so user can select by number/name for full details
+    // Append product lists to option ledger (history); keep lastShownProducts for backward compatibility
     const productsFromResult = result.allResults?.find(r => r.data?.products && Array.isArray(r.data.products))?.data?.products;
     if (productsFromResult && productsFromResult.length > 0) {
+      appendOptionSet(session, productsFromResult, {
+        turnIndex: session.turnCount,
+        context: typeof message === 'string' ? message : '',
+      });
       session.lastShownProducts = productsFromResult;
     }
     

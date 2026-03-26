@@ -70,6 +70,7 @@
             "product_inquiry",
             "more_options",
             "model_selection",
+            "clarify_selection",
             "more_details",
             "price_inquiry",
             "budget_question",
@@ -163,6 +164,7 @@
             { "intent": "more_options", "next": "bike_search" },
             { "intent": "more_details", "next": "more_details_handler" },
             { "intent": "model_selection", "next": "model_details_handler" },
+            { "intent": "clarify_selection", "next": "selection_clarify_handler" },
             { "intent": "price_inquiry", "next": "price_lookup" },
             { "intent": "budget_question", "next": "budget_handler" },
             { "intent": "area_question", "next": "area_handler" },
@@ -561,7 +563,7 @@
           "model": "gpt-4o-mini",
           "temperature": 0.3,
           "max_tokens": 150,
-          "system_prompt": "You are a sales assistant. The user's message was unclear or we need one more detail. Based on the conversation context, last intent, and what is missing (budget, area/location, model/brand, or something else), generate ONE short, friendly clarification question in the user's language (Malay/Chinese/English). Be specific when possible (e.g. 'Just to confirm, is your budget in RM?' or 'You said Puchong – did you mean our Puchong branch?'). Return JSON with: clarification_message (string), language (malay/chinese/english).",
+          "system_prompt": "You are a sales assistant. The user's message was unclear or we need one more detail. Based on the conversation context, last intent, and what is missing (budget, area/location, model/brand, or something else), generate ONE short, friendly clarification question in the user's language (Malay/Chinese/English). Be specific when possible (e.g. 'Just to confirm, is your budget in RM?' or 'You said Puchong – did you mean our Puchong branch?'). IMPORTANT: Do NOT wrap user-provided values (budget, area/location, model/brand) in parentheses. Never output '(' or ')' around those values. Example: write 'your budget RM5000' not 'your budget (RM5000)'. Return JSON with: clarification_message (string), language (malay/chinese/english).",
           "next": "clarification_formatter"
         }
       },
@@ -584,7 +586,7 @@
           "model": "gpt-4o-mini",
           "temperature": 0.3,
           "max_tokens": 250,
-          "system_prompt": "You are a motorcycle sales assistant. The user's search returned no results.\n\nIMPORTANT: If the user was asking about a non-motorcycle product (phone, tablet, laptop, electronics, etc.), do NOT suggest motorcycles as alternatives. Instead, politely explain we only sell motorcycles and invite them to ask about bikes.\n\nIf the user WAS asking about a motorcycle that we don't have:\n1. Briefly explain why there were no results (wrong budget/area, model not in stock).\n2. Suggest 2-3 concrete next steps (try different budget/area, ask for similar models).\n3. Offer to connect them with the team.\n\nReturn JSON with: message (string), was_out_of_scope (boolean).",
+          "system_prompt": "You are a motorcycle sales assistant. The user's search returned no results.\n\nIMPORTANT: If the user was asking about a non-motorcycle product (phone, tablet, laptop, electronics, etc.), do NOT suggest motorcycles as alternatives. Instead, politely explain we only sell motorcycles and invite them to ask about bikes.\n\nIMPORTANT: Do NOT wrap user-provided values (budget, area/location, model/brand) in parentheses. Never output '(' or ')' around those values. Example: write 'budget RM5000' not 'budget (RM5000)'.\n\nIf the user WAS asking about a motorcycle that we don't have:\n1. Briefly explain why there were no results (wrong budget/area, model not in stock).\n2. Suggest 2-3 concrete next steps (try different budget/area, ask for similar models).\n3. Offer to connect them with the team.\n\nReturn JSON with: message (string), was_out_of_scope (boolean).",
           "next": "no_results_formatter"
         }
       },
@@ -606,6 +608,14 @@
         "config": {
           "template": "more_details_prompt",
           "language_aware": true,
+          "next": "response_optimizer"
+        }
+      },
+      {
+        "id": "selection_clarify_handler",
+        "type": "selection_clarify",
+        "name": "Selection Clarify",
+        "config": {
           "next": "response_optimizer"
         }
       },

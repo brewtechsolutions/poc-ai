@@ -1,4 +1,5 @@
 import openai, { TOKEN_CONFIG } from '../config/openai.js';
+import { resolveSelection } from '../utils/session-option-sets.js';
 
 /**
  * LanguageAgent
@@ -493,7 +494,58 @@ class LanguageAgent {
       }
     }
 
-    // User selected a model by number or by name from lastShownProducts
+    // User selected a model by number or name — prefer option ledger, then lastShownProducts
+    const optionSets = context.optionSets || context.metadata?.optionSets;
+    if (Array.isArray(optionSets) && optionSets.length > 0) {
+      const trimmed = message.trim();
+      const isNumericPick = /^[1-9]\d*\.?$/.test(trimmed);
+      const isNamePick = trimmed.length > 1 && trimmed.length <= 80 && !trimmed.includes('?') && !isNumericPick;
+      if (isNumericPick || isNamePick) {
+        const resolved = resolveSelection({ optionSets }, trimmed);
+        if (resolved) {
+          if (process.env.DEBUG === 'true') {
+            console.log(`   [NLP] Model selection via option ledger: ${resolved.item.stableId}`);
+          }
+          return {
+            data: {
+              intent: 'model_selection',
+              entities: {
+                selected_index: resolved.item.displayIndex,
+                selected_id: resolved.item.stableId,
+                selected_title: resolved.item.title,
+                resolved_from_set: resolved.set.id,
+              },
+              language: context.language || 'english',
+              confidence: 0.95,
+              requires_product_search: false,
+              requires_agent_escalation: false,
+            },
+            tokensUsed: 0,
+            confidence: 0.95,
+          };
+        }
+        if (isNumericPick) {
+          return {
+            data: {
+              intent: 'clarify_selection',
+              entities: {
+                message:
+                  'I have multiple lists — could you clarify which item ' +
+                  trimmed +
+                  ' you mean?',
+              },
+              language: context.language || 'english',
+              confidence: 0.95,
+              requires_product_search: false,
+              requires_agent_escalation: false,
+            },
+            tokensUsed: 0,
+            confidence: 0.95,
+          };
+        }
+      }
+    }
+
     const lastShown = context.lastShownProducts || context.metadata?.lastShownProducts;
     if (lastShown && Array.isArray(lastShown) && lastShown.length > 0) {
       const trimmed = message.trim();

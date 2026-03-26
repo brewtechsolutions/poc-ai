@@ -10,6 +10,7 @@ import LanguageAgent from '../agents/language-agent.js';
 import AnalysisAgent from '../agents/analysis-agent.js';
 import ResponseAgent from '../agents/response-agent.js';
 import { AI_ROLES, getRoleConfig } from '../config/ai-registry.js';
+import { resolveProductFromLedger } from '../utils/session-option-sets.js';
 
 // Load workflow JSON without import assertions for broader Node compatibility
 const workflowPath = path.resolve(process.cwd(), 'workflow.json');
@@ -250,6 +251,9 @@ class WorkflowEngine {
       
       case 'model_details':
         return await this.handleModelDetails(node, context);
+
+      case 'selection_clarify':
+        return this.handleSelectionClarify(node, context);
       
       default:
         return { data: context.lastResult?.data, tokensUsed: 0 };
@@ -257,7 +261,29 @@ class WorkflowEngine {
   }
 
   /**
-   * Resolve user selection (number or name) to a product from lastShownProducts or by DB lookup; return full details or "we don't have this model".
+   * Return a fixed clarification line when numbered pick could not be mapped to any list.
+   */
+  handleSelectionClarify(node, context) {
+    const entities = context.lastResult?.data?.entities || context.entities || {};
+    const msg =
+      entities.message ||
+      entities.clarification_message ||
+      'Could you clarify which option you mean?';
+    return {
+      data: {
+        finalResponse: msg,
+        formatted: msg,
+        response: msg,
+        optimized: msg,
+        intent: 'clarify_selection',
+      },
+      tokensUsed: 0,
+      next: node.config?.next || 'response_optimizer',
+    };
+  }
+
+  /**
+   * Resolve user selection (number or name) to a product from option ledger, lastShownProducts, or DB lookup; return full details or "we don't have this model".
    */
   async handleModelDetails(node, context) {
     const templateKey = node.config.template || 'model_detail_full';
@@ -269,12 +295,16 @@ class WorkflowEngine {
     // selected_index can come from router (pass-through) or from NLP result in allResults
     let selectedIndex = entities.selected_index;
     if (!Number.isInteger(selectedIndex) && context.allResults?.length) {
-      const nlpResult = context.allResults.find(r => r.data?.intent === 'model_selection' && r.data?.entities?.selected_index != null);
+      const nlpResult = context.allResults.find(
+        r =>
+          r.data?.intent === 'model_selection' &&
+          (r.data?.entities?.selected_index != null || r.data?.entities?.selected_id != null),
+      );
       selectedIndex = nlpResult?.data?.entities?.selected_index;
     }
 
-    let product = null;
-    if (lastShown && Array.isArray(lastShown) && lastShown.length > 0) {
+    let product = resolveProductFromLedger(context, entities);
+    if (!product && lastShown && Array.isArray(lastShown) && lastShown.length > 0) {
       const idx = selectedIndex;
       if (Number.isInteger(idx) && idx >= 1 && idx <= lastShown.length) {
         product = lastShown[idx - 1];

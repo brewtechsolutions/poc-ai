@@ -9,6 +9,57 @@ import { productMatchesRequestedModel } from '../utils/products.js';
  * Keeps WorkflowEngine focused on orchestration.
  */
 class ResponseAgent {
+  /**
+   * Remove parentheses around user-provided entity values.
+   * This avoids needing per-node prompt hardcoding (works for any node that echoes entities).
+   */
+  static sanitizeUserValueParentheses(response, entities) {
+    if (typeof response !== 'string' || !response) return response;
+
+    const escapeRegExp = (s) =>
+      String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    const buildFlexibleValuePattern = (val) => {
+      const parts = String(val)
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .map(escapeRegExp);
+      return parts.join('\\s+');
+    };
+
+    const e = entities || {};
+    const out = response;
+
+    let result = out;
+
+    // Budget is often formatted as "RM5000" / "RM 5,000" inside parentheses.
+    const hasAnyBudget = !!(e.budget || e.budget_min || e.budget_max || e.price_range);
+    if (hasAnyBudget) {
+      // Remove parentheses that wrap RM numbers.
+      result = result.replace(
+        /[\(\（]\s*(RM\s*[0-9][0-9,\s]*)\s*[\)\）]/gi,
+        '$1',
+      );
+    }
+
+    // Exact value matches for non-budget fields.
+    const valueKeys = ['area', 'location', 'model', 'brand'];
+    for (const key of valueKeys) {
+      const val = e[key];
+      if (typeof val !== 'string') continue;
+      const trimmed = val.trim();
+      if (!trimmed) continue;
+
+      const valuePattern = buildFlexibleValuePattern(trimmed);
+      // Capture the matched inner text so we preserve original casing/spacing.
+      const re = new RegExp(`[\\(（]\\s*(${valuePattern})\\s*[\\)）]`, 'gi');
+      result = result.replace(re, '$1');
+    }
+
+    return result;
+  }
+
   static resolveLanguage(context, workflow, nodeConfig = {}) {
     return (
       context.language ||
@@ -352,6 +403,13 @@ class ResponseAgent {
         node.config.fallback_response ||
         "I apologize, I couldn't process that request. Please try rephrasing your question.";
     }
+
+    // Generic safety: strip parentheses around user-provided entity values
+    // (budget/area/location/model/brand) so user echoes don't show as "(RM5000)".
+    response = this.sanitizeUserValueParentheses(
+      response,
+      context.entities || context.lastResult?.data?.entities || {},
+    );
 
     if (process.env.DEBUG === 'true') {
       console.log(`[Action] Final response: ${response?.substring(0, 100)}...`);

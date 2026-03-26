@@ -6,6 +6,7 @@
 
 import openai, { TOKEN_CONFIG } from '../config/openai.js';
 import { AI_ROLES, getRoleConfig } from '../config/ai-registry.js';
+import { resolveSelection } from '../utils/session-option-sets.js';
 
 /** Skill definitions: name, label, description, and prompt fragment for system prompt composition */
 export const SKILLS = {
@@ -247,7 +248,60 @@ class AnalysisAgent {
       }
     }
 
-    // Model selection by number (1, 2, 3) from last shown products
+    // Model selection via option history ledger (newest matching set first)
+    const optionSets = context.optionSets || context.metadata?.optionSets;
+    const hasLedger = Array.isArray(optionSets) && optionSets.length > 0;
+    const trimmed = message.trim();
+    const isNumericPick = /^[1-9]\d*\.?$/.test(trimmed);
+    const isNamePick =
+      trimmed.length > 1 &&
+      trimmed.length <= 80 &&
+      !trimmed.includes('?') &&
+      !isNumericPick;
+
+    if (hasLedger && (isNumericPick || isNamePick)) {
+      const ledgerContext = { optionSets };
+      const resolved = resolveSelection(ledgerContext, trimmed);
+
+      if (resolved) {
+        if (DEBUG) {
+          console.log(
+            '[AnalysisAgent] fastPath: resolved selection',
+            resolved.item.stableId,
+            'from set',
+            resolved.set.id,
+          );
+        }
+        return this._makeFastResult(
+          'model_selection',
+          {
+            selected_index: resolved.item.displayIndex,
+            selected_id: resolved.item.stableId,
+            selected_title: resolved.item.title,
+            resolved_from_set: resolved.set.id,
+            ...(context.entities || {}),
+          },
+          context,
+          config,
+        );
+      }
+
+      if (isNumericPick) {
+        return this._makeFastResult(
+          'clarify_selection',
+          {
+            message:
+              'I have multiple lists — could you clarify which item ' +
+              trimmed +
+              ' you mean (e.g. repeat the model name or pick from the latest list)?',
+          },
+          context,
+          config,
+        );
+      }
+    }
+
+    // Fallback: single last list only (e.g. terminal / WhatsApp without ledger)
     const lastShown = context.lastShownProducts || context.metadata?.lastShownProducts;
     if (lastShown?.length && /^[1-9]\d*\.?$/.test(message)) {
       const num = parseInt(message, 10);
