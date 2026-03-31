@@ -238,60 +238,33 @@ class SearchAgent {
         const inBudgetAndAreaIds = new Set(inBudgetAndArea.map(p => p.id));
         finalProducts = [...inBudgetAndArea, ...modelMatches.filter(p => !inBudgetAndAreaIds.has(p.id))];
 
-        const modelIsPricey = budgetNum != null && inBudgetAndArea.length === 0;
-        if (modelIsPricey) {
-          const altConditions = {
-            AND: [
-              { active: true },
-              { inStock: true },
-              ...(skipIds.length > 0 ? [{ id: { notIn: skipIds } }] : []),
-              ...(budgetCap != null ? [{ price: { lte: budgetCap } }] : []),
-              { id: { notIn: [...modelIds] } },
-            ],
-          };
-          const alternatives = await prisma.product.findMany({
-            where: altConditions,
-            take: 10,
-            orderBy: { popularity: 'desc' },
-          });
-          let altFiltered = alternatives;
-          if (entities.area) {
-            altFiltered = alternatives.filter(p => {
-              const locations = p.features?.locations || [];
-              return locations.length === 0 || locations.some(loc =>
-                loc.toLowerCase().includes(entities.area.toLowerCase())
-              );
-            });
-            if (altFiltered.length === 0) altFiltered = alternatives;
-          }
-          finalProducts = [...finalProducts, ...altFiltered.slice(0, 1)];
-        } else {
-          const altConditions = {
-            AND: [
-              { active: true },
-              { inStock: true },
-              ...(skipIds.length > 0 ? [{ id: { notIn: skipIds } }] : []),
-              { id: { notIn: [...modelIds] } },
-            ],
-          };
-          if (budgetCap != null) altConditions.AND.push({ price: { lte: budgetCap } });
-          const alternatives = await prisma.product.findMany({
-            where: altConditions,
-            take: 10,
-            orderBy: { popularity: 'desc' },
-          });
-          let altFiltered = alternatives;
-          if (entities.area) {
-            altFiltered = alternatives.filter(p => {
-              const locations = p.features?.locations || [];
-              return locations.length === 0 || locations.some(loc =>
-                loc.toLowerCase().includes(entities.area.toLowerCase())
-              );
-            });
-            if (altFiltered.length === 0) altFiltered = alternatives;
-          }
-          finalProducts = [...finalProducts, ...altFiltered.slice(0, 1)];
+        const altConditions = {
+          AND: [
+            { active: true },
+            { inStock: true },
+            ...(skipIds.length > 0 ? [{ id: { notIn: skipIds } }] : []),
+            { id: { notIn: [...modelIds] } },
+          ],
+        };
+        if (budgetCap != null) {
+          altConditions.AND.push({ price: { lte: budgetCap } });
         }
+        const alternatives = await prisma.product.findMany({
+          where: altConditions,
+          take: 10,
+          orderBy: { popularity: 'desc' },
+        });
+        let altFiltered = alternatives;
+        if (entities.area) {
+          altFiltered = alternatives.filter(p => {
+            const locations = p.features?.locations || [];
+            return locations.length === 0 || locations.some(loc =>
+              loc.toLowerCase().includes(entities.area.toLowerCase())
+            );
+          });
+          if (altFiltered.length === 0) altFiltered = alternatives;
+        }
+        finalProducts.push(...altFiltered.slice(0, 1));
         finalProducts = finalProducts.slice(0, 4);
       } else {
         const modelWords = primarySearchText.split(/\s+/).filter(w => w.length >= 2).map(w => w.trim());
