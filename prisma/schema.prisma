@@ -71,6 +71,8 @@ model Conversation {
   
   intent        String?
   entities      Json?
+  optionSets    Json     @default("[]")
+  lastShownProducts Json?
   productsShown String[] // Array of product IDs shown
   escalated     Boolean  @default(false)
   agentId       String?
