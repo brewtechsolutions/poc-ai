@@ -792,6 +792,7 @@ class LanguageAgent {
     const intent = context.lastResult?.data?.intent;
     const route = node.config.routes.find(r => r.intent === intent);
     const entities = context.lastResult?.data?.entities;
+    const entitiesForTurn = context.lastResult?.data?.entitiesForTurn;
 
     if (process.env.DEBUG === 'true') {
       console.log(
@@ -800,7 +801,12 @@ class LanguageAgent {
     }
 
     return {
-      data: { intent, route, entities: entities || {} },
+      data: {
+        intent,
+        route,
+        entities: entities || {},
+        entitiesForTurn: entitiesForTurn && typeof entitiesForTurn === 'object' ? entitiesForTurn : {},
+      },
       tokensUsed: 0,
       next: route?.next || node.config.fallback,
     };

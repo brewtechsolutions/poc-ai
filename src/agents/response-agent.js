@@ -196,15 +196,50 @@ class ResponseAgent {
 
   /** Optimizer node: rewrite responses in a friendly WhatsApp tone. */
   static async handleOptimizer(node, context) {
+    const prevData = context.lastResult?.data;
     let response =
-      context.lastResult?.data?.formatted ||
-      context.lastResult?.data?.response ||
-      context.lastResult?.data?.finalResponse ||
+      prevData?.formatted ||
+      prevData?.response ||
+      prevData?.finalResponse ||
       '';
     response = (response || '').toString().trim();
 
-    const lastIntent = context.lastIntent || context.lastResult?.data?.intent;
-    const isGreetingFlow = lastIntent === 'greeting' || context.lastResult?.data?.intent === 'greeting';
+    const lastIntent = context.lastIntent || prevData?.intent;
+    const isGreetingFlow = lastIntent === 'greeting' || prevData?.intent === 'greeting';
+
+    // Product list responses carry numbering tied to optionSets.
+    // Rewriting with LLM can change order/model names and desync user picks ("1","2","3").
+    if (Array.isArray(prevData?.products) && prevData.products.length > 0) {
+      const cleaned = response.replace(/\n{3,}/g, '\n\n').trim();
+      if (process.env.DEBUG === 'true') {
+        console.log('[Optimizer] Skipping LLM rewrite for product list response (preserve numbering fidelity)');
+      }
+      return {
+        data: {
+          optimized: cleaned,
+          finalResponse: cleaned,
+          products: prevData.products,
+        },
+        tokensUsed: 0,
+      };
+    }
+
+    // Model details come from DB + ledger with exact product — do NOT send through LLM rewriter
+    // (it often swaps or invents a different model name while "sounding friendly").
+    if (prevData?.product && typeof response === 'string' && response.length > 0) {
+      const cleaned = response.replace(/\n{3,}/g, '\n\n').trim();
+      if (process.env.DEBUG === 'true') {
+        console.log('[Optimizer] Skipping LLM rewrite for structured model_details (preserve product fidelity)');
+      }
+      return {
+        data: {
+          optimized: cleaned,
+          finalResponse: cleaned,
+          product: prevData.product,
+        },
+        tokensUsed: 0,
+      };
+    }
 
     // Only skip optimizer for greeting templates; allow it for language selection so it sounds human.
     if (!response || isGreetingFlow) {

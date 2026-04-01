@@ -261,44 +261,74 @@ class AnalysisAgent {
       !isNumericPick;
 
     if (hasLedger && (isNumericPick || isNamePick)) {
-      const ledgerContext = { optionSets };
-      const resolved = resolveSelection(ledgerContext, trimmed);
-
-      if (resolved) {
-        if (DEBUG) {
-          console.log(
-            '[AnalysisAgent] fastPath: resolved selection',
-            resolved.item.stableId,
-            'from set',
-            resolved.set.id,
-          );
-        }
-        return this._makeFastResult(
-          'model_selection',
-          {
-            selected_index: resolved.item.displayIndex,
-            selected_id: resolved.item.stableId,
-            selected_title: resolved.item.title,
-            resolved_from_set: resolved.set.id,
-            ...(context.entities || {}),
-          },
-          context,
-          config,
-        );
-      }
+      const latestSet = optionSets[optionSets.length - 1];
 
       if (isNumericPick) {
-        return this._makeFastResult(
-          'clarify_selection',
-          {
-            message:
-              'I have multiple lists — could you clarify which item ' +
-              trimmed +
-              ' you mean (e.g. repeat the model name or pick from the latest list)?',
-          },
-          context,
-          config,
-        );
+        // Numeric picks: ONLY check the latest option set — never walk history
+        if (latestSet) {
+          const num = parseInt(trimmed, 10);
+          const items = Array.isArray(latestSet.items) ? latestSet.items : [];
+          const item = items.find(it => it.displayIndex === num);
+
+          if (item) {
+            if (DEBUG) {
+              console.log(
+                '[AnalysisAgent] fastPath: numeric selection',
+                item.stableId,
+                'from latest set',
+                latestSet.id,
+              );
+            }
+            return this._makeFastResult(
+              'model_selection',
+              {
+                ...(context.entities || {}),
+                selected_index: item.displayIndex,
+                selected_id: item.stableId,
+                selected_title: item.title,
+                resolved_from_set: latestSet.id,
+              },
+              context,
+              config,
+            );
+          }
+
+          // Number is out of range for latest set — use top-level clarificationMessage so merge does not drop it
+          const clarifyMsg =
+            items.length > 0
+              ? `Please pick a number between 1 and ${items.length} from the latest list.`
+              : 'Please pick a valid number from the list.';
+          return this._makeClarifySelectionResult(context, config, clarifyMsg);
+        }
+      }
+
+      if (isNamePick) {
+        // Name picks: walk full history — user might refer to an older item by name
+        const ledgerContext = { optionSets };
+        const resolved = resolveSelection(ledgerContext, trimmed);
+
+        if (resolved) {
+          if (DEBUG) {
+            console.log(
+              '[AnalysisAgent] fastPath: name selection',
+              resolved.item.stableId,
+              'from set',
+              resolved.set.id,
+            );
+          }
+          return this._makeFastResult(
+            'model_selection',
+            {
+              ...(context.entities || {}),
+              selected_index: resolved.item.displayIndex,
+              selected_id: resolved.item.stableId,
+              selected_title: resolved.item.title,
+              resolved_from_set: resolved.set.id,
+            },
+            context,
+            config,
+          );
+        }
       }
     }
 
@@ -324,6 +354,26 @@ class AnalysisAgent {
     return {
       intent,
       entities,
+      language: context.language || config.languages?.[0] || 'english',
+      confidence: 0.95,
+      suggestedQuestion: null,
+      missingInfo: [],
+      hasAskedBudget: context.hasAskedBudget || false,
+      hasAskedArea: context.hasAskedArea || false,
+      hasAskedModel: context.hasAskedModel || false,
+      salesInsight: null,
+      skipAlreadyShownIds: [],
+      source: 'fast_path',
+      tokensUsed: 0,
+    };
+  }
+
+  /** Same shape as _makeFastResult but intent fixed; message is not stored in entities (avoids merge loss in workflow). */
+  static _makeClarifySelectionResult(context, config, clarificationMessage) {
+    return {
+      intent: 'clarify_selection',
+      entities: context.entities || {},
+      clarificationMessage,
       language: context.language || config.languages?.[0] || 'english',
       confidence: 0.95,
       suggestedQuestion: null,

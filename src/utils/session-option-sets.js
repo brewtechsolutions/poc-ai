@@ -89,13 +89,50 @@ export function resolveSelection(contextOrSession, input) {
 }
 
 /**
+ * Normalize selected_index from entities (router may pass string).
+ */
+function resolvedDisplayIndex(entities) {
+  const raw = entities?.selected_index;
+  if (typeof raw === 'number' && Number.isInteger(raw)) return raw;
+  const n = parseInt(String(raw ?? ''), 10);
+  return Number.isNaN(n) ? null : n;
+}
+
+/**
+ * Numeric-only replies refer to the Nth item of the **latest** assistant list (same UX as AnalysisAgent).
+ * Use when stableId / setId lookup failed but the session still has a current option set (e.g. after DB load).
+ */
+export function resolveProductFromLatestNumberedPick(context, entities, userMessage) {
+  const trimmed = String(userMessage || '').trim();
+  if (!/^[1-9]\d*\.?$/.test(trimmed)) return null;
+  const idx = resolvedDisplayIndex(entities);
+  if (idx == null || idx < 1) return null;
+  const sets = getSets(context);
+  if (!sets.length) return null;
+  const latest = sets[sets.length - 1];
+  const item = latest.items?.find(it => it.displayIndex === idx);
+  return item?.raw ?? null;
+}
+
+/**
  * Load full product/object from ledger using entities from a resolved selection.
+ * Prefer (resolved_from_set + display index) so we return the exact list cell the user chose;
+ * stableId alone can match the wrong row if duplicate IDs or duplicate model keys appear in one list.
  */
 export function resolveProductFromLedger(context, entities) {
-  if (!entities?.selected_id) return null;
   const sets = getSets(context);
-  const sid = String(entities.selected_id);
+  if (!sets.length || !entities) return null;
+
   const setId = entities.resolved_from_set;
+  const idx = resolvedDisplayIndex(entities);
+  if (setId && idx != null && idx >= 1) {
+    const set = sets.find(s => s.id === setId);
+    const item = set?.items?.find(it => it.displayIndex === idx);
+    if (item?.raw) return item.raw;
+  }
+
+  if (!entities.selected_id) return null;
+  const sid = String(entities.selected_id);
 
   if (setId) {
     const set = sets.find(s => s.id === setId);

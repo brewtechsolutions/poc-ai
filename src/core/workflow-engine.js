@@ -10,7 +10,10 @@ import LanguageAgent from '../agents/language-agent.js';
 import AnalysisAgent from '../agents/analysis-agent.js';
 import ResponseAgent from '../agents/response-agent.js';
 import { AI_ROLES, getRoleConfig } from '../config/ai-registry.js';
-import { resolveProductFromLedger } from '../utils/session-option-sets.js';
+import {
+  resolveProductFromLedger,
+  resolveProductFromLatestNumberedPick,
+} from '../utils/session-option-sets.js';
 
 // Load workflow JSON without import assertions for broader Node compatibility
 const workflowPath = path.resolve(process.cwd(), 'workflow.json');
@@ -264,10 +267,15 @@ class WorkflowEngine {
    * Return a fixed clarification line when numbered pick could not be mapped to any list.
    */
   handleSelectionClarify(node, context) {
-    const entities = context.lastResult?.data?.entities || context.entities || {};
+    const clarifyFromAnalysis = (context.allResults || []).filter(r => r.data?.intent === 'clarify_selection');
+    const analysisResult = clarifyFromAnalysis[clarifyFromAnalysis.length - 1];
     const msg =
-      entities.message ||
-      entities.clarification_message ||
+      analysisResult?.data?.clarificationMessage ||
+      context.lastResult?.data?.clarificationMessage ||
+      context.lastResult?.data?.entities?.message ||
+      context.lastResult?.data?.entities?.clarification_message ||
+      context.entities?.message ||
+      context.entities?.clarification_message ||
       'Could you clarify which option you mean?';
     return {
       data: {
@@ -290,24 +298,113 @@ class WorkflowEngine {
     const language = context.language || context.lastResult?.data?.language || 'english';
     const lastShown = context.lastShownProducts || context.metadata?.lastShownProducts;
     const message = (context.user_message || '').trim().toLowerCase();
-    const entities = context.lastResult?.data?.entities || context.entities || {};
 
-    // selected_index can come from router (pass-through) or from NLP result in allResults
-    let selectedIndex = entities.selected_index;
-    if (!Number.isInteger(selectedIndex) && context.allResults?.length) {
-      const nlpResult = context.allResults.find(
-        r =>
-          r.data?.intent === 'model_selection' &&
-          (r.data?.entities?.selected_index != null || r.data?.entities?.selected_id != null),
-      );
-      selectedIndex = nlpResult?.data?.entities?.selected_index;
+    // Prefer entitiesForTurn (this turn only) — merged context.entities keeps stale selected_id across turns
+    const turnOnly = context.lastResult?.data?.entitiesForTurn;
+    const baseEntities =
+      turnOnly && typeof turnOnly === 'object' && Object.keys(turnOnly).length > 0
+        ? turnOnly
+        : context.lastResult?.data?.entities ||
+          context.entities ||
+          {};
+
+    const modelPickResults = (context.allResults || []).filter(
+      r =>
+        r.data?.intent === 'model_selection' &&
+        (r.data?.entitiesForTurn?.selected_index != null ||
+          r.data?.entitiesForTurn?.selected_id != null ||
+          r.data?.entities?.selected_index != null ||
+          r.data?.entities?.selected_id != null),
+    );
+    const pickData = modelPickResults[modelPickResults.length - 1]?.data;
+    const fromModelPick = pickData?.entitiesForTurn || pickData?.entities;
+    const entities = { ...baseEntities };
+    if (fromModelPick) {
+      if (entities.selected_id == null && fromModelPick.selected_id != null) {
+        entities.selected_id = fromModelPick.selected_id;
+      }
+      if (!Number.isInteger(entities.selected_index) && fromModelPick.selected_index != null) {
+        entities.selected_index = fromModelPick.selected_index;
+      }
+      if (entities.resolved_from_set == null && fromModelPick.resolved_from_set != null) {
+        entities.resolved_from_set = fromModelPick.resolved_from_set;
+      }
     }
 
+    let selectedIndex = entities.selected_index;
+    const selectedIndexNum =
+      typeof selectedIndex === 'number' && Number.isInteger(selectedIndex)
+        ? selectedIndex
+        : parseInt(String(selectedIndex ?? ''), 10);
+    const hasValidIndex =
+      !Number.isNaN(selectedIndexNum) && selectedIndexNum >= 1;
+
     let product = resolveProductFromLedger(context, entities);
+
+    const optionSets = context.optionSets || context.metadata?.optionSets || [];
+
+    // Latest set by stableId (after resolveProductFromLedger — covers missing setId in ledger helper)
+    if (!product && entities.selected_id) {
+      if (optionSets.length > 0) {
+        const latestSet = optionSets[optionSets.length - 1];
+        const ledgerItem = latestSet?.items?.find(
+          it => String(it.stableId) === String(entities.selected_id),
+        );
+        if (ledgerItem?.raw) {
+          product = ledgerItem.raw;
+          if (process.env.DEBUG === 'true') {
+            console.log(`   [ModelDetails] Resolved product from latest ledger set: ${ledgerItem.title}`);
+          }
+        }
+      }
+    }
+
+    // Exact set from analysis (e.g. name pick from an older list)
+    if (!product && entities.selected_id && entities.resolved_from_set) {
+      const targetSet = optionSets.find(s => s.id === entities.resolved_from_set);
+      if (targetSet) {
+        const ledgerItem = targetSet.items?.find(
+          it => String(it.stableId) === String(entities.selected_id),
+        );
+        if (ledgerItem?.raw) {
+          product = ledgerItem.raw;
+          if (process.env.DEBUG === 'true') {
+            console.log(
+              `   [ModelDetails] Resolved product from set ${entities.resolved_from_set}: ${ledgerItem.title}`,
+            );
+          }
+        }
+      }
+    }
+
+    // Latest set by display index (aligns with numbered list; not stale lastShownProducts)
+    if (!product && optionSets.length > 0 && hasValidIndex) {
+      const latestSet = optionSets[optionSets.length - 1];
+      const latestItem = latestSet?.items?.find(it => it.displayIndex === selectedIndexNum);
+      if (latestItem?.raw) {
+        product = latestItem.raw;
+        if (process.env.DEBUG === 'true') {
+          console.log(
+            `   [ModelDetails] Resolved product from latest set by index ${selectedIndexNum}: ${latestItem.title}`,
+          );
+        }
+      }
+    }
+
+    // Numeric-only message: Nth row of latest set (same UX as AnalysisAgent)
+    if (!product) {
+      product = resolveProductFromLatestNumberedPick(context, entities, context.user_message);
+    }
+
+    // Last resort: lastShownProducts may be stale vs optionSets — log when used
     if (!product && lastShown && Array.isArray(lastShown) && lastShown.length > 0) {
-      const idx = selectedIndex;
-      if (Number.isInteger(idx) && idx >= 1 && idx <= lastShown.length) {
-        product = lastShown[idx - 1];
+      if (hasValidIndex && selectedIndexNum <= lastShown.length) {
+        product = lastShown[selectedIndexNum - 1];
+        if (process.env.DEBUG === 'true') {
+          console.warn(
+            `   [ModelDetails] WARNING: Falling back to lastShownProducts[${selectedIndexNum - 1}] — may be stale`,
+          );
+        }
       }
       if (!product) {
         product = lastShown.find(p =>
@@ -558,6 +655,7 @@ class WorkflowEngine {
         hasAskedArea: plan.hasAskedArea,
         hasAskedModel: plan.hasAskedModel,
         salesInsight: plan.salesInsight,
+        clarificationMessage: plan.clarificationMessage ?? null,
       },
       tokensUsed,
       next: node.config?.next || 'analysis_router',

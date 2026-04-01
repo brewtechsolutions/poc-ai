@@ -1,26 +1,82 @@
 import express from 'express';
 import WorkflowEngine from '../core/workflow-engine.js';
 import { appendOptionSet } from '../utils/session-option-sets.js';
+import prisma from '../config/database.js';
 
 const router = express.Router();
 
-// In-memory session storage for testing (use Redis/DB in production)
-const sessions = new Map();
+// In-memory cache for non-DB session state (option sets, entities, etc.)
+// This is fine for POC - these are runtime state, not conversation history
+const sessionCache = new Map();
+
+/**
+ * Helper: get or create User by phoneNumber
+ */
+async function getOrCreateUser(phoneNumber) {
+  let user = await prisma.user.findUnique({
+    where: { phoneNumber },
+  });
+
+  if (!user) {
+    user = await prisma.user.create({
+      data: { phoneNumber },
+    });
+  }
+
+  return user;
+}
+
+/**
+ * Helper: get or create Conversation for a user
+ */
+async function getOrCreateConversation(userId) {
+  // For POC, use one conversation per sessionId
+  // Find the most recent conversation for this user
+  let conversation = await prisma.conversation.findFirst({
+    where: { userId },
+    orderBy: { createdAt: 'desc' },
+    include: {
+      messages: {
+        orderBy: { createdAt: 'asc' },
+      },
+    },
+  });
+
+  if (!conversation) {
+    conversation = await prisma.conversation.create({
+      data: {
+        userId,
+        productsShown: [],
+        optionSets: [],
+        tokensUsed: 0,
+      },
+      include: {
+        messages: true,
+      },
+    });
+  }
+
+  return conversation;
+}
 
 /**
  * Fully automated test chat endpoint
- * Maintains conversation state and shows full flow
  */
 router.post('/api/test-chat', async (req, res) => {
   try {
     const { message, sessionId, clearSession } = req.body;
-    
-    // Generate or use existing session
+
     const currentSessionId = sessionId || `test-${Date.now()}`;
-    
+    const phoneNumber = `test-${currentSessionId}`;
+
     // Clear session if requested
     if (clearSession) {
-      sessions.delete(currentSessionId);
+      const user = await prisma.user.findUnique({ where: { phoneNumber } });
+      if (user) {
+        // Delete all conversations and messages (cascade)
+        await prisma.conversation.deleteMany({ where: { userId: user.id } });
+      }
+      sessionCache.delete(currentSessionId);
       return res.json({
         success: true,
         message: 'Session cleared',
@@ -28,68 +84,88 @@ router.post('/api/test-chat', async (req, res) => {
       });
     }
 
-    // Get or create session
-    let session = sessions.get(currentSessionId);
-    if (!session) {
-      session = {
-        id: currentSessionId,
-        phoneNumber: `test-${currentSessionId}`,
-        messages: [],
-        startTime: Date.now(),
-        totalTokens: 0,
-        hasAskedBudget: false,
-        hasAskedArea: false,
-        hasAskedModel: false,
-        skipAlreadyShownIds: [],
-        salesInsights: [],
-        optionSets: [],
-        activeSetId: null,
-        turnCount: 0,
-      };
-      sessions.set(currentSessionId, session);
-    }
+    // Get or create user and conversation
+    const user = await getOrCreateUser(phoneNumber);
+    const conversation = await getOrCreateConversation(user.id);
 
-    session.turnCount = (session.turnCount ?? 0) + 1;
-
-    // Add user message to session
-    const userMessage = {
-      type: 'user',
-      content: message,
-      timestamp: new Date().toISOString(),
+    // Get runtime session cache; hydrate optionSets / lastShown from DB when cache is cold (e.g. after restart)
+    let cache = sessionCache.get(currentSessionId) || {
+      language: null,
+      languageLocked: false,
+      lastIntent: null,
+      lastEntities: {},
+      lastShownProducts: conversation.lastShownProducts ?? null,
+      optionSets: Array.isArray(conversation.optionSets) ? conversation.optionSets : [],
+      activeSetId: null,
+      hasAskedBudget: false,
+      hasAskedArea: false,
+      hasAskedModel: false,
+      skipAlreadyShownIds: [],
+      salesInsights: [],
+      totalTokens: 0,
+      turnCount: 0,
+      startTime: Date.now(),
     };
-    session.messages.push(userMessage);
 
-    // Execute workflow (pass persisted state so we don't re-greet or lose context)
+    cache.turnCount = (cache.turnCount ?? 0) + 1;
+
+    // Save user message to DB
+    await prisma.message.create({
+      data: {
+        conversationId: conversation.id,
+        type: 'text',
+        content: message,
+        isFromUser: true,
+      },
+    });
+
+    // Build full conversation history from DB messages
+    const allMessages = conversation.messages || [];
+    const conversationHistory = allMessages
+      .map((m) => ({
+        role: m.isFromUser ? 'user' : 'assistant',
+        content: m.content || '',
+      }))
+      .filter((m) => m.content);
+
+    // Add current user message to history
+    conversationHistory.push({ role: 'user', content: message });
+
+    // DB is source of truth for ledger state — in-memory cache can lag behind after "got others?" / multi-instance
+    const dbOptionSets = Array.isArray(conversation.optionSets) ? conversation.optionSets : [];
+    const dbLastShownProducts = conversation.lastShownProducts ?? null;
+    if (dbOptionSets.length > 0) cache.optionSets = dbOptionSets;
+    if (dbLastShownProducts) cache.lastShownProducts = dbLastShownProducts;
+
+    // Build context for workflow
     const workflowEngine = new WorkflowEngine();
     const context = {
       user_message: message,
-      language: session.language,
-      languageLocked: session.languageLocked,
-      lastIntent: session.lastIntent,
-      phone_number: session.phoneNumber,
+      language: cache.language,
+      languageLocked: cache.languageLocked,
+      lastIntent: cache.lastIntent,
+      phone_number: phoneNumber,
       conversation_id: currentSessionId,
-      entities: session.lastEntities,
-      lastShownProducts: session.lastShownProducts,
-      optionSets: session.optionSets ?? [],
-      activeSetId: session.activeSetId ?? null,
-      hasAskedBudget: session.hasAskedBudget || false,
-      hasAskedArea: session.hasAskedArea || false,
-      hasAskedModel: session.hasAskedModel || false,
-      skipAlreadyShownIds: session.skipAlreadyShownIds || [],
+      entities: cache.lastEntities,
+      lastShownProducts: dbLastShownProducts ?? cache.lastShownProducts,
+      optionSets: dbOptionSets.length > 0 ? dbOptionSets : (cache.optionSets ?? []),
+      activeSetId: cache.activeSetId ?? null,
+      hasAskedBudget: cache.hasAskedBudget || false,
+      hasAskedArea: cache.hasAskedArea || false,
+      hasAskedModel: cache.hasAskedModel || false,
+      skipAlreadyShownIds: cache.skipAlreadyShownIds || [],
       metadata: {
-        phone_number: session.phoneNumber,
+        phone_number: phoneNumber,
         message_type: 'text',
         timestamp: new Date().toISOString(),
-        language: session.language,
-        entities: session.lastEntities,
-        lastShownProducts: session.lastShownProducts,
-        optionSets: session.optionSets ?? [],
-        activeSetId: session.activeSetId ?? null,
+        language: cache.language,
+        entities: cache.lastEntities,
+        lastShownProducts: dbLastShownProducts ?? cache.lastShownProducts,
+        optionSets: dbOptionSets.length > 0 ? dbOptionSets : (cache.optionSets ?? []),
+        activeSetId: cache.activeSetId ?? null,
       },
-      conversationHistory: session.messages.slice(-5).map(m => ({
-        role: m.type === 'user' ? 'user' : 'assistant',
-        content: m.content,
-      })),
+      // Full conversation history from DB - no slice limit
+      conversationHistory,
     };
 
     const result = await workflowEngine.execute(context);
@@ -105,128 +181,128 @@ router.post('/api/test-chat', async (req, res) => {
       );
     };
 
-    // Persist state for next message so we never re-greet and keep language locked
-    if (result.language) {
-      session.language = result.language;
-    }
-    if (result.languageLocked !== undefined) {
-      session.languageLocked = result.languageLocked;
-    }
-    if (result.lastIntent !== undefined) {
-      session.lastIntent = result.lastIntent;
-    }
-    // Persist AnalysisAgent tracking flags
-    if (result.hasAskedBudget !== undefined) session.hasAskedBudget = result.hasAskedBudget;
-    if (result.hasAskedArea !== undefined) session.hasAskedArea = result.hasAskedArea;
-    if (result.hasAskedModel !== undefined) session.hasAskedModel = result.hasAskedModel;
-
-    // Accumulate shown product IDs so agent never re-shows them
-    if (result.skipAlreadyShownIds?.length > 0) {
-      const existing = new Set(session.skipAlreadyShownIds || []);
-      result.skipAlreadyShownIds.forEach(id => existing.add(id));
-      session.skipAlreadyShownIds = [...existing];
-    }
-
-    // Keep last sales insight for logging/dashboard
-    if (result.salesInsight) {
-      session.salesInsights = [...(session.salesInsights || []), result.salesInsight].slice(-5);
-    }
-
-    // Merge entities: AnalysisAgent first, then legacy allResults, never lose previously known
-    const analysisEntities = result.analysisEntities || {};
-    const legacyEntities = result.allResults
-      ?.find(r => r.data?.entities && Object.keys(r.data.entities).length > 0)
-      ?.data?.entities || {};
-    const merged = { ...(session.lastEntities || {}), ...legacyEntities, ...analysisEntities };
-    if (Object.keys(merged).length > 0) {
-      session.lastEntities = merged;
-    }
-    // Append product lists to option ledger (history); keep lastShownProducts for backward compatibility
-    const productsFromResult = result.allResults?.find(r => r.data?.products && Array.isArray(r.data.products))?.data?.products;
-    if (productsFromResult && productsFromResult.length > 0) {
-      appendOptionSet(session, productsFromResult, {
-        turnIndex: session.turnCount,
-        context: typeof message === 'string' ? message : '',
-      });
-      session.lastShownProducts = productsFromResult;
-    }
-    
-    // Extract response - check multiple sources
+    // Extract response
     let response = null;
-    
-    // Priority 1: Check last result (action node should have finalResponse)
     response = getResponseFromData(result.lastResult?.data);
-    
-    // Priority 2: Check all results in reverse order
     if (!response && result.allResults) {
       for (let i = result.allResults.length - 1; i >= 0; i--) {
-        const resultData = result.allResults[i]?.data;
-        response = getResponseFromData(resultData);
+        response = getResponseFromData(result.allResults[i]?.data);
         if (response) break;
       }
     }
-    
-    // Priority 3: Check workflow steps
-    if (!response && result.workflowSteps) {
-      for (let i = result.workflowSteps.length - 1; i >= 0; i--) {
-        // The workflowSteps might have stored data differently
-        // Check if we can access the actual result
-        const step = result.workflowSteps[i];
-        // Note: workflowSteps only store metadata, not full data
-      }
-    }
-    
-    // Priority 4: Check lastResult for any response field
-    if (!response && result.lastResult?.data) {
-      response = getResponseFromData(result.lastResult.data);
-    }
-    
-    // Priority 5: Error handling
     if (!response) {
-      if (result.errors && result.errors.length > 0) {
-        response = `I encountered an error: ${result.errors[0]}. Please try again or contact support.`;
-      } else {
-        // Last resort - this shouldn't happen if workflow is working
-        response = 'I apologize, I couldn\'t process that request. Please try rephrasing your question.';
-        console.error('⚠️ No response found in workflow result:', {
-          hasLastResult: !!result.lastResult,
-          lastResultKeys: result.lastResult?.data ? Object.keys(result.lastResult.data) : [],
-          allResultsCount: result.allResults?.length || 0,
-        });
-      }
+      response = result.errors?.length > 0
+        ? `I encountered an error: ${result.errors[0]}. Please try again.`
+        : "I apologize, I couldn't process that request. Please try rephrasing.";
     }
 
-    // Add bot response to session
-    const botMessage = {
-      type: 'bot',
-      content: response,
-      timestamp: new Date().toISOString(),
-      debug: {
-        intent: result.lastResult?.data?.intent,
-        confidence: result.lastResult?.data?.confidence,
-        entities: result.lastResult?.data?.entities,
-        products: result.lastResult?.data?.products,
-        tokensUsed: result.tokensUsed,
-        responseTime: result.responseTime,
+    // Save bot response to DB
+    await prisma.message.create({
+      data: {
+        conversationId: conversation.id,
+        type: 'text',
+        content: response,
+        isFromUser: false,
+        intent: result.lastResult?.data?.intent || null,
+        entities: result.lastResult?.data?.entities || undefined,
+        processed: true,
       },
-    };
-    session.messages.push(botMessage);
-    session.totalTokens += result.tokensUsed || 0;
-    session.lastActivity = Date.now();
+    });
 
-    // Prepare response with full conversation
+    // Update conversation metadata in DB
+    // Use the *last* step that returned products so the ledger matches the most recent list shown
+    // (find() alone returns the first match and can append the wrong batch to optionSets).
+    const productSteps = (result.allResults || []).filter(
+      (r) => r.data?.products && Array.isArray(r.data.products),
+    );
+    const productsFromResult = productSteps[productSteps.length - 1]?.data?.products;
+
+    const shownIds = productsFromResult?.map((p) => p.id).filter(Boolean) || [];
+    const updatedProductsShown = [...new Set([
+      ...(conversation.productsShown || []),
+      ...shownIds,
+    ])];
+
+    // Update runtime cache
+    if (result.language) cache.language = result.language;
+    if (result.languageLocked !== undefined) cache.languageLocked = result.languageLocked;
+    if (result.lastIntent !== undefined) cache.lastIntent = result.lastIntent;
+    if (result.hasAskedBudget !== undefined) cache.hasAskedBudget = result.hasAskedBudget;
+    if (result.hasAskedArea !== undefined) cache.hasAskedArea = result.hasAskedArea;
+    if (result.hasAskedModel !== undefined) cache.hasAskedModel = result.hasAskedModel;
+
+    // Merge entities
+    const analysisEntities = result.analysisEntities || {};
+    const legacyEntities = result.allResults
+      ?.find((r) => r.data?.entities && Object.keys(r.data.entities).length > 0)
+      ?.data?.entities || {};
+    const mergedEntities = { ...(cache.lastEntities || {}), ...legacyEntities, ...analysisEntities };
+    if (Object.keys(mergedEntities).length > 0) cache.lastEntities = mergedEntities;
+
+    // Update option sets
+    if (productsFromResult && productsFromResult.length > 0) {
+      const tempSession = { optionSets: cache.optionSets, activeSetId: cache.activeSetId };
+      appendOptionSet(tempSession, productsFromResult, {
+        turnIndex: cache.turnCount,
+        context: typeof message === 'string' ? message : '',
+      });
+      cache.optionSets = tempSession.optionSets;
+      cache.activeSetId = tempSession.activeSetId;
+      cache.lastShownProducts = productsFromResult;
+    }
+
+    // Update skipAlreadyShownIds
+    const updatedSkipIds = [...new Set([
+      ...(cache.skipAlreadyShownIds || []),
+      ...(result.skipAlreadyShownIds || []),
+    ])];
+    cache.skipAlreadyShownIds = updatedSkipIds;
+
+    // Update salesInsights
+    if (result.salesInsight) {
+      cache.salesInsights = [...(cache.salesInsights || []), result.salesInsight].slice(-10);
+    }
+
+    cache.totalTokens = (cache.totalTokens || 0) + (result.tokensUsed || 0);
+    sessionCache.set(currentSessionId, cache);
+
+    await prisma.conversation.update({
+      where: { id: conversation.id },
+      data: {
+        intent: result.lastIntent || result.lastResult?.data?.intent || null,
+        entities: Object.keys(cache.lastEntities || {}).length > 0 ? cache.lastEntities : undefined,
+        optionSets: cache.optionSets ?? [],
+        lastShownProducts: cache.lastShownProducts ?? undefined,
+        productsShown: updatedProductsShown,
+        escalated: result.lastResult?.data?.intent === 'agent_request' || false,
+        tokensUsed: (conversation.tokensUsed || 0) + (result.tokensUsed || 0),
+        responseTime: result.responseTime || null,
+      },
+    });
+
+    // Build messages array for response
+    const updatedMessages = [
+      ...allMessages.map((m) => ({
+        type: m.isFromUser ? 'user' : 'bot',
+        content: m.content,
+        timestamp: m.createdAt,
+      })),
+      { type: 'user', content: message, timestamp: new Date().toISOString() },
+      { type: 'bot', content: response, timestamp: new Date().toISOString() },
+    ];
+
     res.json({
       success: true,
       sessionId: currentSessionId,
-      response: response,
-      language: result.language || session.language,
+      response,
+      language: result.language || cache.language,
       conversation: {
-        messages: session.messages,
+        messages: updatedMessages,
         stats: {
-          totalMessages: session.messages.length,
-          totalTokens: session.totalTokens,
-          duration: Date.now() - session.startTime,
-          language: session.language,
+          totalMessages: updatedMessages.length,
+          totalTokens: cache.totalTokens,
+          duration: Date.now() - cache.startTime,
+          language: cache.language,
         },
       },
       debug: {
@@ -257,26 +333,44 @@ router.post('/api/test-chat', async (req, res) => {
 /**
  * Get conversation history
  */
-router.get('/api/test-chat/:sessionId', (req, res) => {
+router.get('/api/test-chat/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
-  const session = sessions.get(sessionId);
-  
-  if (!session) {
-    return res.status(404).json({
-      success: false,
-      error: 'Session not found',
-    });
+  const phoneNumber = `test-${sessionId}`;
+
+  const user = await prisma.user.findUnique({
+    where: { phoneNumber },
+    include: {
+      conversations: {
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+        include: {
+          messages: {
+            orderBy: { createdAt: 'asc' },
+          },
+        },
+      },
+    },
+  });
+
+  if (!user || !user.conversations.length) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
   }
+
+  const conversation = user.conversations[0];
 
   res.json({
     success: true,
     session: {
-      id: session.id,
-      messages: session.messages,
+      id: sessionId,
+      messages: conversation.messages.map((m) => ({
+        type: m.isFromUser ? 'user' : 'bot',
+        content: m.content,
+        timestamp: m.createdAt,
+      })),
       stats: {
-        totalMessages: session.messages.length,
-        totalTokens: session.totalTokens,
-        duration: Date.now() - session.startTime,
+        totalMessages: conversation.messages.length,
+        totalTokens: conversation.tokensUsed,
+        duration: Date.now() - new Date(conversation.createdAt).getTime(),
       },
     },
   });
@@ -285,19 +379,30 @@ router.get('/api/test-chat/:sessionId', (req, res) => {
 /**
  * List all active sessions
  */
-router.get('/api/test-chat', (req, res) => {
-  const activeSessions = Array.from(sessions.values()).map(session => ({
-    id: session.id,
-    messageCount: session.messages.length,
-    totalTokens: session.totalTokens,
-    lastActivity: session.lastActivity,
-    duration: Date.now() - session.startTime,
-  }));
+router.get('/api/test-chat', async (req, res) => {
+  const conversations = await prisma.conversation.findMany({
+    orderBy: { updatedAt: 'desc' },
+    take: 50,
+    include: {
+      user: true,
+      messages: {
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+      },
+    },
+  });
 
   res.json({
     success: true,
-    sessions: activeSessions,
-    count: activeSessions.length,
+    sessions: conversations.map((c) => ({
+      id: c.user.phoneNumber.replace('test-', ''),
+      messageCount: c.messages.length,
+      totalTokens: c.tokensUsed,
+      language: null,
+      lastActivity: c.updatedAt,
+      duration: Date.now() - new Date(c.createdAt).getTime(),
+    })),
+    count: conversations.length,
   });
 });
 

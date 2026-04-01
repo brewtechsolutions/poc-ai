@@ -99,7 +99,7 @@
           ],
           "languages": ["english", "malay", "chinese"],
           "fallback_intent": "product_recommendation",
-          "history_window": 6,
+          "history_window": 20,
           "missing_slots": [
             "budget",
             "area",
