@@ -155,7 +155,7 @@
               "intent": "more_options"
             },
             {
-              "pattern": "compare|versus|vs\\\\.?|which is better|which one is better|bandingkan",
+              "pattern": "compare|versus|vs\\\\.?|which is better|which one is better|more fuel efficient|most fuel efficient|better mileage|bandingkan",
               "flags": "i",
               "intent": "compare_bikes"
             }
@@ -185,6 +185,54 @@
               "pattern": "比较全部|比较所有",
               "flags": "i",
               "compare_scope": "all"
+            }
+          ],
+          "comparative_follow_up_exclude_rules": [
+            {
+              "pattern": "\\bcompare\\s+\\S+.{0,80}\\s+(and|vs\\.?|versus|atau)\\s+\\S+",
+              "flags": "i"
+            },
+            {
+              "pattern": "\\b[1-9]\\b\\s*(,|and|&|vs\\.?|versus|atau)\\s*\\b[1-9]\\b",
+              "flags": ""
+            }
+          ],
+          "comparative_follow_up_rules": [
+            {
+              "pattern": "(哪个|哪辆|哪一种|哪一款|哪一台).{0,12}(最|更)?(省油|省燃油|低油耗)",
+              "flags": "u"
+            },
+            {
+              "pattern": "(最|更)(省油|省燃油)",
+              "flags": "u"
+            },
+            {
+              "pattern": "(油耗|燃油经济|省油).{0,40}(哪个|哪|比较|最|更|谁|哪台)|(哪个|哪|比较|最|更|谁|哪台).{0,40}(油耗|燃油经济|省油)",
+              "flags": "u"
+            },
+            {
+              "pattern": "\\b(yang\\s+)?paling\\s+jimat(\\s+minyak)?\\b",
+              "flags": "i"
+            },
+            {
+              "pattern": "\\b(jimat\\s+minyak|konsumsi\\s+minyak|lebih\\s+jimat)\\b",
+              "flags": "i"
+            },
+            {
+              "pattern": "\\b(mana|yang)\\s+(lebih\\s+)?jimat\\b",
+              "flags": "i"
+            },
+            {
+              "pattern": "\\b(more fuel efficient|most fuel efficient|better mileage|better for fuel|save fuel|uses less (fuel|petrol)|fuel consumption|petrol consumption)\\b",
+              "flags": "i"
+            },
+            {
+              "pattern": "\\b(which|what)\\b.{0,120}\\b(fuel|mileage|petrol|economy|efficient|consumption|cheaper|lighter|faster|heavy|speed)\\b",
+              "flags": "is"
+            },
+            {
+              "pattern": "\\b(which one|which would|which is)\\b.{0,80}\\b(better|cheaper|lighter|faster|worth|economical)\\b",
+              "flags": "is"
             }
           ],
           "next": "analysis_router"

@@ -106,10 +106,20 @@ router.post('/api/test-chat', async (req, res) => {
       skipAlreadyShownIds: [],
       salesInsights: [],
       pendingCompare: null,
+      lastComparedItems: null,
       totalTokens: 0,
       turnCount: 0,
       startTime: Date.now(),
     };
+
+    if (
+      conversation.entities &&
+      typeof conversation.entities === 'object' &&
+      Array.isArray(conversation.entities.lastComparedItems) &&
+      conversation.entities.lastComparedItems.length >= 2
+    ) {
+      cache.lastComparedItems = conversation.entities.lastComparedItems;
+    }
 
     cache.turnCount = (cache.turnCount ?? 0) + 1;
 
@@ -168,6 +178,7 @@ router.post('/api/test-chat', async (req, res) => {
       hasAskedModel: cache.hasAskedModel || false,
       skipAlreadyShownIds: cache.skipAlreadyShownIds || [],
       pendingCompare: cache.pendingCompare ?? null,
+      lastComparedItems: cache.lastComparedItems ?? cache.lastEntities?.lastComparedItems ?? null,
       metadata: {
         phone_number: phoneNumber,
         message_type: 'text',
@@ -177,6 +188,7 @@ router.post('/api/test-chat', async (req, res) => {
         lastShownProducts: effectiveLastShown,
         optionSets: dbOptionSets.length > 0 ? dbOptionSets : (cache.optionSets ?? []),
         activeSetId: cache.activeSetId ?? null,
+        lastComparedItems: cache.lastComparedItems ?? cache.lastEntities?.lastComparedItems ?? null,
       },
       // Full conversation history from DB - no slice limit
       conversationHistory,
@@ -261,6 +273,14 @@ router.post('/api/test-chat', async (req, res) => {
       ?.data?.entities || {};
     const mergedEntities = { ...(cache.lastEntities || {}), ...legacyEntities, ...analysisEntities };
     if (Object.keys(mergedEntities).length > 0) cache.lastEntities = mergedEntities;
+
+    if (result.lastComparedItems !== undefined) {
+      cache.lastComparedItems = result.lastComparedItems;
+      cache.lastEntities = {
+        ...(cache.lastEntities || {}),
+        lastComparedItems: result.lastComparedItems,
+      };
+    }
 
     // Update option sets
     if (productsFromResult && productsFromResult.length > 0) {

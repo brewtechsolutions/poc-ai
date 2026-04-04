@@ -7,6 +7,7 @@
 import openai, { TOKEN_CONFIG } from '../config/openai.js';
 import { AI_ROLES, getRoleConfig } from '../config/ai-registry.js';
 import { resolveSelection } from '../utils/session-option-sets.js';
+import { matchesComparativeFollowUp } from '../utils/comparative-follow-up.js';
 
 /** Skill definitions: name, label, description, and prompt fragment for system prompt composition */
 export const SKILLS = {
@@ -49,7 +50,8 @@ export const SKILLS = {
 ## Skill: Context Memory
 - Use conversationHistory to interpret "2" (model selection), "got others?" (more_options), "yes"/"要" (follow last intent).
 - If the last bot message asked for language/budget/area/model and user replies with a short answer, map it to the right intent and entities.
-- Asking to SEE or REPEAT the bike list is NOT a compare: "show me the list", "show the list", "show list", "list again", "what bikes did you show", "senarai lagi", "列表呢" → intent **more_options** (or bike_recommendation if budget/area still missing). Never set compare_bikes or entities.compare_scope for these — compare_bikes is only when they explicitly compare models or say "compare all".`,
+- Asking to SEE or REPEAT the bike list is NOT a compare: "show me the list", "show the list", "show list", "list again", "what bikes did you show", "senarai lagi", "列表呢" → intent **more_options** (or bike_recommendation if budget/area still missing). Never set compare_bikes or entities.compare_scope for these — compare_bikes is only when they explicitly compare models or say "compare all".
+- If bikes were already listed and the user asks which is better on one criterion (e.g. "哪个最省油", "which is most fuel efficient", "mana paling jimat minyak", "which is cheaper") → intent **compare_bikes**, NOT greeting and NOT a fresh bike_recommendation — they are comparing the shown models.`,
   },
   escalation_radar: {
     name: 'escalation_radar',
@@ -297,6 +299,37 @@ class AnalysisAgent {
         if (DEBUG) {
           console.warn('[AnalysisAgent] Invalid compare_mode_rule regex:', rule.pattern, err.message);
         }
+      }
+    }
+
+    // Comparative follow-up (fuel, mileage, price, etc.) — needs a ledger with at least 2 rows
+    const lastComparedSnap =
+      context.lastComparedItems ||
+      context.metadata?.lastComparedItems ||
+      context.entities?.lastComparedItems;
+    const comparativeFollowUp = matchesComparativeFollowUp(trimmed, config);
+    if (comparativeFollowUp && hasLedger) {
+      const latestSet = optionSets[optionSets.length - 1];
+      const n = latestSet?.items?.length ?? 0;
+      if (n >= 2) {
+        if (DEBUG) {
+          console.log('[AnalysisAgent] fastPath: comparative follow-up → compare_bikes', {
+            n,
+            hasLastCompared: Array.isArray(lastComparedSnap) && lastComparedSnap.length >= 2,
+          });
+        }
+        return this._makeFastResult(
+          'compare_bikes',
+          {
+            ...(context.entities || {}),
+            comparative_follow_up: true,
+            ...(Array.isArray(lastComparedSnap) && lastComparedSnap.length >= 2
+              ? { lastComparedItems: lastComparedSnap }
+              : {}),
+          },
+          context,
+          config,
+        );
       }
     }
 

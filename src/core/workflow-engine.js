@@ -15,6 +15,7 @@ import {
   resolveProductFromLedger,
   resolveProductFromLatestNumberedPick,
 } from '../utils/session-option-sets.js';
+import { matchesComparativeFollowUp } from '../utils/comparative-follow-up.js';
 
 // Load workflow JSON without import assertions for broader Node compatibility
 const workflowPath = path.resolve(process.cwd(), 'workflow.json');
@@ -35,6 +36,37 @@ class WorkflowEngine {
 
   getAnalysisAgentConfig() {
     return this.nodes.get('analysis_agent')?.config || {};
+  }
+
+  /**
+   * Follow-up questions about a criterion (fuel, price, weight, etc.) without naming two numbers.
+   * Excludes lines that look like an explicit "compare A and B" / two-index picks.
+   */
+
+  /**
+   * Bikes to use for a comparative follow-up: last compared snapshot, or exactly-two list, or full list.
+   */
+  static resolveItemsForComparativeFollowUp(context, latestSet) {
+    const items = latestSet?.items;
+    if (!Array.isArray(items) || items.length < 2) return null;
+
+    const snapshot =
+      context.lastComparedItems ||
+      context.metadata?.lastComparedItems ||
+      context.entities?.lastComparedItems;
+    if (Array.isArray(snapshot) && snapshot.length >= 2) {
+      const byStable = new Map(items.map(it => [String(it.stableId), it]));
+      const resolved = [];
+      for (const s of snapshot) {
+        const sid = s?.stableId != null ? String(s.stableId) : null;
+        if (sid && byStable.has(sid)) resolved.push(byStable.get(sid));
+      }
+      if (resolved.length >= 2) return resolved;
+    }
+
+    if (items.length === 2) return items;
+    if (items.length > 2) return items;
+    return null;
   }
 
   /** Match user message against `compare_mode_rules` in workflow (e.g. compare_scope: "all"). */
@@ -150,6 +182,10 @@ class WorkflowEngine {
 
         if (result.data != null && Object.prototype.hasOwnProperty.call(result.data, 'pendingCompare')) {
           executionContext.pendingCompare = result.data.pendingCompare;
+        }
+
+        if (result.data != null && Object.prototype.hasOwnProperty.call(result.data, 'lastComparedItems')) {
+          executionContext.lastComparedItems = result.data.lastComparedItems;
         }
 
         // Track final response if found
@@ -525,6 +561,13 @@ class WorkflowEngine {
       return await this.runBikeComparisonMany(latestSet.items, language, node);
     }
 
+    if (matchesComparativeFollowUp(message, this.getAnalysisAgentConfig())) {
+      const followItems = WorkflowEngine.resolveItemsForComparativeFollowUp(context, latestSet);
+      if (followItems && followItems.length >= 2) {
+        return await this.runComparativeAttributeAnswer(followItems, message, language, node);
+      }
+    }
+
     const refs = this.parseCompareRefs(message, latestSet);
 
     /** Common typos like "mmodenas" → try "modenas" by collapsing repeated letters. */
@@ -680,6 +723,12 @@ Stay concise when ${n} is large; skip filler.`;
       const tokensUsed = completion.usage?.total_tokens || 0;
       const raws = items.map(it => it.raw).filter(Boolean);
 
+      const lastComparedItems = items.map(it => ({
+        stableId: it.stableId,
+        displayIndex: it.displayIndex,
+        title: it.title,
+      }));
+
       return {
         data: {
           finalResponse: response,
@@ -688,6 +737,7 @@ Stay concise when ${n} is large; skip filler.`;
           productsCompared: raws,
           productCount: n,
           pendingCompare: null,
+          lastComparedItems,
         },
         tokensUsed,
         next: node.config?.next || 'response_sender',
@@ -700,12 +750,111 @@ Stay concise when ${n} is large; skip filler.`;
         return `*${p.name || it.title}* — ${p.currency || 'MYR'} ${p.price ?? '-'} | ${eng}`;
       });
       const fallback = `Quick comparison:\n\n${lines.join('\n')}`;
+      const lastComparedItems = items.map(it => ({
+        stableId: it.stableId,
+        displayIndex: it.displayIndex,
+        title: it.title,
+      }));
       return {
         data: {
           finalResponse: fallback,
           formatted: fallback,
           response: fallback,
           pendingCompare: null,
+          lastComparedItems,
+        },
+        tokensUsed: 0,
+        next: node.config?.next || 'response_sender',
+      };
+    }
+  }
+
+  /**
+   * Answer a follow-up comparative question (e.g. fuel efficiency) using ledger items.
+   */
+  async runComparativeAttributeAnswer(items, userMessage, language, node) {
+    const notFoundTpl = this.workflow.templates?.compare_bikes_not_found;
+    const notFoundMsg =
+      notFoundTpl?.[language] ||
+      notFoundTpl?.english ||
+      'Please pick two bikes from the current list to compare.';
+    const n = Array.isArray(items) ? items.length : 0;
+    if (n < 2) {
+      return {
+        data: {
+          finalResponse: notFoundMsg,
+          formatted: notFoundMsg,
+          response: notFoundMsg,
+          pendingCompare: null,
+        },
+        tokensUsed: 0,
+        next: node.config?.next || 'response_sender',
+      };
+    }
+
+    const lastComparedItems = items.map(it => ({
+      stableId: it.stableId,
+      displayIndex: it.displayIndex,
+      title: it.title,
+    }));
+
+    const systemPrompt = `You are a motorcycle sales assistant. The user asked a follow-up question about ${n} motorcycle(s) they were shown. Write entirely in ${language}.
+Use only the data provided. If the data does not include what they asked (e.g. official fuel figures), say so honestly and infer cautiously from engine size, type, or description when reasonable.
+Output for WhatsApp:
+1. Direct answer to their question (which model(s) win on their criterion, or a clear ranking if ${n} > 2).
+2. One short bullet per model with the relevant fact from the data — max ${n} bullets.
+3. One short closing line offering the next step (e.g. test ride, or ask for two numbers to compare side-by-side).
+Stay concise.`;
+
+    const userPrompt = items
+      .map((it, i) => {
+        const p = it.raw || {};
+        return `— Bike ${i + 1} (list #${it.displayIndex}: ${it.title})\nName: ${p.name || it.title}\nPrice: ${p.currency || 'MYR'} ${p.price ?? '-'}\nFeatures JSON: ${JSON.stringify(p.features || {})}\nDescription: ${p.description || ''}`;
+      })
+      .join('\n\n');
+
+    const maxTokens = Math.min(2048, 380 + n * 180);
+
+    try {
+      const completion = await openai.chat.completions.create({
+        model: this.optimizerRoleConfig.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: `User question: ${userMessage}\n\nMotorcycle data:\n\n${userPrompt}`,
+          },
+        ],
+        temperature: 0.3,
+        max_tokens: maxTokens,
+      });
+
+      const response = completion.choices?.[0]?.message?.content || notFoundMsg;
+      const tokensUsed = completion.usage?.total_tokens || 0;
+      const raws = items.map(it => it.raw).filter(Boolean);
+
+      return {
+        data: {
+          finalResponse: response,
+          formatted: response,
+          response,
+          productsCompared: raws,
+          productCount: n,
+          pendingCompare: null,
+          lastComparedItems,
+        },
+        tokensUsed,
+        next: node.config?.next || 'response_sender',
+      };
+    } catch (error) {
+      console.error('[CompareBikes] Comparative follow-up LLM error:', error.message);
+      return {
+        data: {
+          finalResponse: notFoundMsg,
+          formatted: notFoundMsg,
+          response: notFoundMsg,
+          pendingCompare: null,
+          lastComparedItems,
         },
         tokensUsed: 0,
         next: node.config?.next || 'response_sender',
