@@ -227,12 +227,42 @@
               "flags": "i"
             },
             {
-              "pattern": "\\b(which|what)\\b.{0,120}\\b(fuel|mileage|petrol|economy|efficient|consumption|cheaper|lighter|faster|heavy|speed)\\b",
+              "pattern": "\\b(which|what)\\b.{0,120}\\b(fuel|mileage|petrol|economy|efficient|consumption|cheaper|cheapest|affordable|price|cost|value|lighter|faster|heavy|speed)\\b",
               "flags": "is"
             },
             {
-              "pattern": "\\b(which one|which would|which is)\\b.{0,80}\\b(better|cheaper|lighter|faster|worth|economical)\\b",
+              "pattern": "\\b(which one|which would|which is)\\b.{0,80}\\b(better|cheaper|cheapest|affordable|lighter|faster|worth|economical|expensive)\\b",
               "flags": "is"
+            },
+            {
+              "pattern": "\\b(which one|which would|which is|which)\\b.{0,100}\\b(more\\s+)?(better|best|cheaper|cheapest|affordable|cheap|lighter|faster|worth|economical)\\b",
+              "flags": "is"
+            },
+            {
+              "pattern": "\\b(most\\s+affordable|more\\s+affordable|least\\s+expensive|lowest\\s+price|best\\s+value|best\\s+bang)\\b",
+              "flags": "i"
+            },
+            {
+              "pattern": "(哪个|哪辆|哪一款).{0,12}(最便宜|实惠|划算|性价比高|价格低)",
+              "flags": "u"
+            },
+            {
+              "pattern": "\\b(mana\\s+paling\\s+murah|yang\\s+paling\\s+murah|lebih\\s+murah|paling\\s+berbaloi)\\b",
+              "flags": "i"
+            }
+          ],
+          "language_selector_bypass_rules": [
+            {
+              "pattern": "\\b(how much|what('s|s|\\s+is)\\s+the\\s+price|price\\s+of|berapa\\s+harga|harga\\s+berapa|多少钱|什么价格|规格|warranty|abs|engine\\s+cc|loan|installment|ansuran)\\b",
+              "flags": "i"
+            },
+            {
+              "pattern": "\\b(tell\\s+me\\s+more|more\\s+details?|full\\s+spec|specs?)\\b",
+              "flags": "i"
+            },
+            {
+              "pattern": "(详细|介绍一下|还有|推荐哪|哪一款|哪台好)",
+              "flags": "u"
             }
           ],
           "next": "analysis_router"

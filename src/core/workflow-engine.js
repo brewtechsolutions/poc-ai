@@ -800,6 +800,7 @@ Stay concise when ${n} is large; skip filler.`;
 
     const systemPrompt = `You are a motorcycle sales assistant. The user asked a follow-up question about ${n} motorcycle(s) they were shown. Write entirely in ${language}.
 Use only the data provided. If the data does not include what they asked (e.g. official fuel figures), say so honestly and infer cautiously from engine size, type, or description when reasonable.
+If they ask which is cheapest, most affordable, best value, or lowest price: use the Price fields (RM) — name the single most affordable model when prices are present, and mention if any price is missing.
 Output for WhatsApp:
 1. Direct answer to their question (which model(s) win on their criterion, or a clear ranking if ${n} > 2).
 2. One short bullet per model with the relevant fact from the data — max ${n} bullets.

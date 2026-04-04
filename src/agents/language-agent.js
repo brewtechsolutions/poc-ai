@@ -1,5 +1,6 @@
 import openai, { TOKEN_CONFIG } from '../config/openai.js';
 import { resolveSelection } from '../utils/session-option-sets.js';
+import { shouldBypassLanguageGate } from '../utils/comparative-follow-up.js';
 
 /**
  * LanguageAgent
@@ -62,13 +63,15 @@ class LanguageAgent {
 
     if (
       !context.languageLocked &&
-      (looksLikeBudgetOrBikeQuery || looksLikeLocationRefinement) &&
-      !looksLikeLanguageChoice
+      !looksLikeLanguageChoice &&
+      (looksLikeBudgetOrBikeQuery ||
+        looksLikeLocationRefinement ||
+        shouldBypassLanguageGate(raw))
     ) {
       context.language = context.language || 'english';
       if (process.env.DEBUG === 'true') {
         console.log(
-          `   [LanguageSelector] Detected content message (budget/bike/location) without explicit language selection; defaulting to ${context.language} and continuing (not locking language)`,
+          `   [LanguageSelector] Substantive message (budget/bike/location/workflow rules); defaulting to ${context.language} and continuing (not locking language)`,
         );
       }
       return { data: { language: context.language }, tokensUsed: 0, next: nextIfSet };
