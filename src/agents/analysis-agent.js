@@ -260,6 +260,36 @@ class AnalysisAgent {
       !trimmed.includes('?') &&
       !isNumericPick;
 
+    const hasCompareKeyword = /compare|vs\.?|versus|bandingkan|比较/i.test(trimmed);
+    if (context.pendingCompare && hasCompareKeyword) {
+      if (DEBUG) {
+        console.log('[AnalysisAgent] fastPath: new compare request detected, clearing pendingCompare');
+      }
+      context.pendingCompare = null;
+    }
+
+    // Pending compare clarification: one pick (number / short ref), not a new compare request
+    if (context.pendingCompare) {
+      const looksLikeComparePhrase =
+        /\b(compare|versus|vs\.?|bandingkan)\b/i.test(trimmed) ||
+        /\s+(and|or|vs\.?|versus|atau)\s+/i.test(trimmed);
+      const isContinuationPick =
+        (isNumericPick || isNamePick) && !looksLikeComparePhrase && !hasCompareKeyword;
+      if (isContinuationPick) {
+        if (DEBUG) console.log('[AnalysisAgent] fastPath: pending compare continuation', trimmed);
+        return this._makeFastResult(
+          'compare_bikes',
+          {
+            ...(context.entities || {}),
+            pendingCompare: context.pendingCompare,
+            selectedRef: trimmed,
+          },
+          context,
+          config,
+        );
+      }
+    }
+
     if (hasLedger && (isNumericPick || isNamePick)) {
       const latestSet = optionSets[optionSets.length - 1];
 

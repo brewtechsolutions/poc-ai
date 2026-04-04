@@ -94,7 +94,10 @@ router.post('/api/test-chat', async (req, res) => {
       languageLocked: false,
       lastIntent: null,
       lastEntities: {},
-      lastShownProducts: conversation.lastShownProducts ?? null,
+      lastShownProducts:
+        Array.isArray(conversation.lastShownProducts) && conversation.lastShownProducts.length > 0
+          ? conversation.lastShownProducts
+          : null,
       optionSets: Array.isArray(conversation.optionSets) ? conversation.optionSets : [],
       activeSetId: null,
       hasAskedBudget: false,
@@ -102,6 +105,7 @@ router.post('/api/test-chat', async (req, res) => {
       hasAskedModel: false,
       skipAlreadyShownIds: [],
       salesInsights: [],
+      pendingCompare: null,
       totalTokens: 0,
       turnCount: 0,
       startTime: Date.now(),
@@ -135,7 +139,16 @@ router.post('/api/test-chat', async (req, res) => {
     const dbOptionSets = Array.isArray(conversation.optionSets) ? conversation.optionSets : [];
     const dbLastShownProducts = conversation.lastShownProducts ?? null;
     if (dbOptionSets.length > 0) cache.optionSets = dbOptionSets;
-    if (dbLastShownProducts) cache.lastShownProducts = dbLastShownProducts;
+    // Do not overwrite cache with [] — empty DB JSON is truthy and would wipe last search (compare-only turns)
+    if (Array.isArray(dbLastShownProducts) && dbLastShownProducts.length > 0) {
+      cache.lastShownProducts = dbLastShownProducts;
+    }
+
+    // `??` is wrong for [] — DB [] is not nullish, so it would beat cache and empty the list on every request
+    const effectiveLastShown =
+      Array.isArray(dbLastShownProducts) && dbLastShownProducts.length > 0
+        ? dbLastShownProducts
+        : cache.lastShownProducts ?? null;
 
     // Build context for workflow
     const workflowEngine = new WorkflowEngine();
@@ -147,20 +160,21 @@ router.post('/api/test-chat', async (req, res) => {
       phone_number: phoneNumber,
       conversation_id: currentSessionId,
       entities: cache.lastEntities,
-      lastShownProducts: dbLastShownProducts ?? cache.lastShownProducts,
+      lastShownProducts: effectiveLastShown,
       optionSets: dbOptionSets.length > 0 ? dbOptionSets : (cache.optionSets ?? []),
       activeSetId: cache.activeSetId ?? null,
       hasAskedBudget: cache.hasAskedBudget || false,
       hasAskedArea: cache.hasAskedArea || false,
       hasAskedModel: cache.hasAskedModel || false,
       skipAlreadyShownIds: cache.skipAlreadyShownIds || [],
+      pendingCompare: cache.pendingCompare ?? null,
       metadata: {
         phone_number: phoneNumber,
         message_type: 'text',
         timestamp: new Date().toISOString(),
         language: cache.language,
         entities: cache.lastEntities,
-        lastShownProducts: dbLastShownProducts ?? cache.lastShownProducts,
+        lastShownProducts: effectiveLastShown,
         optionSets: dbOptionSets.length > 0 ? dbOptionSets : (cache.optionSets ?? []),
         activeSetId: cache.activeSetId ?? null,
       },
@@ -169,6 +183,13 @@ router.post('/api/test-chat', async (req, res) => {
     };
 
     const result = await workflowEngine.execute(context);
+
+    if (Array.isArray(result.optionSets) && result.optionSets.length > 0) {
+      cache.optionSets = result.optionSets;
+    }
+    if (Array.isArray(result.lastShownProducts) && result.lastShownProducts.length > 0) {
+      cache.lastShownProducts = result.lastShownProducts;
+    }
 
     const getResponseFromData = (data) => {
       if (!data) return null;
@@ -264,6 +285,41 @@ router.post('/api/test-chat', async (req, res) => {
     }
 
     cache.totalTokens = (cache.totalTokens || 0) + (result.tokensUsed || 0);
+
+    const compareStep = (result.allResults || [])
+      .slice()
+      .reverse()
+      .find((r) => r.data && Object.prototype.hasOwnProperty.call(r.data, 'pendingCompare'));
+    if (compareStep?.data?.pendingCompare !== undefined) {
+      cache.pendingCompare = compareStep.data.pendingCompare;
+      if (compareStep.data.pendingCompare) {
+        cache.lastEntities = {
+          ...(cache.lastEntities || {}),
+          pendingCompare: compareStep.data.pendingCompare,
+        };
+      } else if (cache.lastEntities) {
+        delete cache.lastEntities.pendingCompare;
+        delete cache.lastEntities.selectedRef;
+      }
+    } else if (result.pendingCompare !== undefined) {
+      cache.pendingCompare = result.pendingCompare;
+      if (result.pendingCompare) {
+        cache.lastEntities = {
+          ...(cache.lastEntities || {}),
+          pendingCompare: result.pendingCompare,
+        };
+      } else if (cache.lastEntities) {
+        delete cache.lastEntities.pendingCompare;
+        delete cache.lastEntities.selectedRef;
+      }
+    } else if (result.lastIntent === 'compare_bikes' || cache.lastIntent === 'compare_bikes') {
+      cache.pendingCompare = null;
+      if (cache.lastEntities) {
+        delete cache.lastEntities.pendingCompare;
+        delete cache.lastEntities.selectedRef;
+      }
+    }
+
     sessionCache.set(currentSessionId, cache);
 
     await prisma.conversation.update({

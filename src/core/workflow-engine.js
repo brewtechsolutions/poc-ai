@@ -11,6 +11,7 @@ import AnalysisAgent from '../agents/analysis-agent.js';
 import ResponseAgent from '../agents/response-agent.js';
 import { AI_ROLES, getRoleConfig } from '../config/ai-registry.js';
 import {
+  appendOptionSet,
   resolveProductFromLedger,
   resolveProductFromLatestNumberedPick,
 } from '../utils/session-option-sets.js';
@@ -126,6 +127,10 @@ class WorkflowEngine {
         }
         if (result.data?.intent) {
           executionContext.lastIntent = result.data.intent;
+        }
+
+        if (result.data != null && Object.prototype.hasOwnProperty.call(result.data, 'pendingCompare')) {
+          executionContext.pendingCompare = result.data.pendingCompare;
         }
 
         // Track final response if found
@@ -257,6 +262,9 @@ class WorkflowEngine {
 
       case 'selection_clarify':
         return this.handleSelectionClarify(node, context);
+
+      case 'compare_bikes':
+        return await this.handleCompareBikes(node, context);
       
       default:
         return { data: context.lastResult?.data, tokensUsed: 0 };
@@ -286,8 +294,410 @@ class WorkflowEngine {
         intent: 'clarify_selection',
       },
       tokensUsed: 0,
-      next: node.config?.next || 'response_optimizer',
+      next: node.config?.next || 'response_sender',
     };
+  }
+
+  /** Strip filler words so "another yamaha" matches products like "yamaha". */
+  static normalizeCompareRef(ref) {
+    if (ref == null || ref === '') return '';
+    return String(ref)
+      .trim()
+      .replace(/^(another|other|the|a|an|my|this|that)\s+/i, '')
+      .trim();
+  }
+
+  /**
+   * Load two distinct products from DB by brand/name fragment (when session has no ledger).
+   */
+  async resolveTwoProductsFromDb(ref1, ref2) {
+    const q1 = ref1.toLowerCase();
+    const q2 = ref2.toLowerCase();
+    if (q1.length < 2 || q2.length < 2 || q1 === q2) return null;
+
+    const findCandidates = async (q) =>
+      prisma.product.findMany({
+        where: {
+          active: true,
+          inStock: true,
+          OR: [
+            { brand: { contains: q, mode: 'insensitive' } },
+            { name: { contains: q, mode: 'insensitive' } },
+            { description: { contains: q, mode: 'insensitive' } },
+          ],
+        },
+        take: 15,
+        orderBy: { popularity: 'desc' },
+      });
+
+    try {
+      const [a, b] = await Promise.all([findCandidates(q1), findCandidates(q2)]);
+      const p1 = a[0];
+      if (!p1) return null;
+      const p2 = b.find((p) => p.id !== p1.id) || b[0];
+      if (!p2 || p1.id === p2.id) return null;
+      return [p1, p2];
+    } catch (e) {
+      console.error('[CompareBikes] DB fallback error:', e.message);
+      return null;
+    }
+  }
+
+  /**
+   * Compare two bikes from the latest option set by number or model name.
+   */
+  async handleCompareBikes(node, context) {
+    const language = context.language || 'english';
+    const message = (context.user_message || '').trim();
+    let optionSets = context.optionSets || context.metadata?.optionSets || [];
+    let latestSet = optionSets[optionSets.length - 1];
+
+    // Ledger can be missing after compare-only turns, server restart, or DB without optionSets —
+    // lastShownProducts still holds the bikes from the last search; rebuild a numbered set for compare.
+    if (!latestSet || !Array.isArray(latestSet.items) || latestSet.items.length < 2) {
+      const lastShown =
+        context.lastShownProducts || context.metadata?.lastShownProducts || null;
+      if (Array.isArray(lastShown) && lastShown.length >= 2) {
+        const tempSession = { optionSets: Array.isArray(optionSets) ? [...optionSets] : [] };
+        appendOptionSet(tempSession, lastShown, {
+          turnIndex: context.turnCount ?? 0,
+          context: 'compare-fallback-lastShown',
+        });
+        optionSets = tempSession.optionSets;
+        latestSet = optionSets[optionSets.length - 1];
+        context.optionSets = optionSets;
+        if (context.metadata) context.metadata.optionSets = optionSets;
+      }
+    }
+
+    // No list in session: resolve two products by name/brand from DB (repeatable "compare X and Y")
+    if (!latestSet || !Array.isArray(latestSet.items) || latestSet.items.length < 2) {
+      const rawRefs = this.parseCompareRefs(message, latestSet);
+      const ref1 = WorkflowEngine.normalizeCompareRef(rawRefs[0]);
+      const ref2 = WorkflowEngine.normalizeCompareRef(rawRefs[1]);
+      if (ref1 && ref2) {
+        const pair = await this.resolveTwoProductsFromDb(ref1, ref2);
+        if (pair) {
+          const tempSession = { optionSets: Array.isArray(optionSets) ? [...optionSets] : [] };
+          appendOptionSet(tempSession, pair, {
+            turnIndex: context.turnCount ?? 0,
+            context: 'compare-fallback-db',
+          });
+          optionSets = tempSession.optionSets;
+          latestSet = optionSets[optionSets.length - 1];
+          context.optionSets = optionSets;
+          if (context.metadata) context.metadata.optionSets = optionSets;
+        }
+      }
+    }
+
+    if (latestSet?.items?.length >= 2) {
+      context.lastShownProducts = latestSet.items.map(it => it.raw).filter(Boolean);
+    }
+
+    const turnOnly = context.lastResult?.data?.entitiesForTurn;
+    const entities =
+      turnOnly && typeof turnOnly === 'object' && Object.keys(turnOnly).length > 0
+        ? { ...(context.entities || {}), ...turnOnly }
+        : context.entities || {};
+
+    const notFoundTpl = this.workflow.templates?.compare_bikes_not_found;
+    const notFoundMsg =
+      notFoundTpl?.[language] ||
+      notFoundTpl?.english ||
+      'Please pick two bikes from the current list to compare.';
+    const invalidPickMsg =
+      notFoundTpl?.[language] ||
+      notFoundTpl?.english ||
+      'Please pick a valid number from the list.';
+
+    const isNewCompareRequest = /compare|vs\.?|versus|bandingkan|比较/i.test(message);
+    if (isNewCompareRequest) {
+      context.pendingCompare = null;
+    }
+
+    // Never use entities.pendingCompare on a new compare line — cache may still hold last turn's
+    const pendingCompare = isNewCompareRequest
+      ? null
+      : context.pendingCompare || entities.pendingCompare;
+
+    if (!latestSet || !Array.isArray(latestSet.items) || latestSet.items.length < 2) {
+      return {
+        data: {
+          finalResponse: notFoundMsg,
+          formatted: notFoundMsg,
+          response: notFoundMsg,
+          pendingCompare: null,
+        },
+        tokensUsed: 0,
+        next: node.config?.next || 'response_sender',
+      };
+    }
+
+    const selectedRef =
+      entities.selectedRef != null && String(entities.selectedRef).trim() !== ''
+        ? String(entities.selectedRef).trim()
+        : '';
+
+    if (pendingCompare?.resolvedItem && selectedRef) {
+      let clarifiedItem = null;
+      const numPick = parseInt(selectedRef, 10);
+      if (!Number.isNaN(numPick)) {
+        clarifiedItem = latestSet.items.find(it => it.displayIndex === numPick) || null;
+      } else {
+        const q = selectedRef.toLowerCase();
+        const nameMatches = latestSet.items.filter(it => {
+          const title = String(it.title || '').toLowerCase();
+          const name = String(it.raw?.name || '').toLowerCase();
+          return title.includes(q) || name.includes(q);
+        });
+        if (nameMatches.length === 1) clarifiedItem = nameMatches[0];
+      }
+
+      if (!clarifiedItem) {
+        return {
+          data: {
+            finalResponse: invalidPickMsg,
+            formatted: invalidPickMsg,
+            response: invalidPickMsg,
+            pendingCompare,
+          },
+          tokensUsed: 0,
+          next: node.config?.next || 'response_sender',
+        };
+      }
+
+      const resolvedItem = pendingCompare.resolvedItem;
+      const rawA = resolvedItem?.raw;
+      const rawB = clarifiedItem?.raw;
+      if (!rawA || !rawB) {
+        const msg = 'Sorry, I could not find one of the bikes. Please try again.';
+        return {
+          data: { finalResponse: msg, formatted: msg, response: msg, pendingCompare: null },
+          tokensUsed: 0,
+          next: node.config?.next || 'response_sender',
+        };
+      }
+
+      if (String(resolvedItem.stableId) === String(clarifiedItem.stableId)) {
+        return {
+          data: {
+            finalResponse: notFoundMsg,
+            formatted: notFoundMsg,
+            response: notFoundMsg,
+            pendingCompare,
+          },
+          tokensUsed: 0,
+          next: node.config?.next || 'response_sender',
+        };
+      }
+
+      return await this.runBikeComparison(resolvedItem, clarifiedItem, language, node);
+    }
+
+    const refs = this.parseCompareRefs(message, latestSet);
+
+    const resolveRef = (ref) => {
+      if (!ref) return [];
+      const num = parseInt(ref, 10);
+      if (!Number.isNaN(num)) {
+        const item = latestSet.items.find(it => it.displayIndex === num);
+        return item ? [item] : [];
+      }
+      const q = ref.toLowerCase();
+      const seen = new Set();
+      const matches = [];
+      for (const it of latestSet.items) {
+        const title = String(it.title || '').toLowerCase();
+        const name = String(it.raw?.name || '').toLowerCase();
+        if (!title.includes(q) && !name.includes(q)) continue;
+        const id = String(it.stableId ?? `${it.displayIndex}`);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        matches.push(it);
+      }
+      return matches;
+    };
+
+    const matches1 = refs[0] ? resolveRef(refs[0]) : [];
+    const matches2 = refs[1] ? resolveRef(refs[1]) : [];
+
+    const isAmbiguous1 = matches1.length > 1;
+    const isAmbiguous2 = matches2.length > 1;
+
+    if (isAmbiguous1 || isAmbiguous2) {
+      let clarifyMsg = '';
+      let nextPending = null;
+
+      if (isAmbiguous1 && isAmbiguous2) {
+        const list1 = matches1.map(it => `${it.displayIndex}. ${it.title}`).join('\n');
+        const list2 = matches2.map(it => `${it.displayIndex}. ${it.title}`).join('\n');
+        clarifyMsg = `I found multiple matches!\n\nFor "${refs[0]}":\n${list1}\n\nFor "${refs[1]}":\n${list2}\n\nPlease reply with two numbers, e.g. "compare 1 and 3".`;
+        nextPending = null;
+      } else if (isAmbiguous1) {
+        const list1 = matches1.map(it => `${it.displayIndex}. ${it.title}`).join('\n');
+        clarifyMsg = `I found multiple *${refs[0]}* models:\n${list1}\n\nWhich one did you mean? Please reply with the number.`;
+        const resolved = matches2[0];
+        if (resolved) nextPending = { resolvedItem: resolved, awaitingRef: refs[0] };
+      } else {
+        const list2 = matches2.map(it => `${it.displayIndex}. ${it.title}`).join('\n');
+        clarifyMsg = `I found multiple *${refs[1]}* models:\n${list2}\n\nWhich one did you mean? Please reply with the number.`;
+        const resolved = matches1[0];
+        if (resolved) nextPending = { resolvedItem: resolved, awaitingRef: refs[1] };
+      }
+
+      return {
+        data: {
+          finalResponse: clarifyMsg,
+          formatted: clarifyMsg,
+          response: clarifyMsg,
+          pendingCompare: nextPending,
+        },
+        tokensUsed: 0,
+        next: node.config?.next || 'response_sender',
+      };
+    }
+
+    const item1 = matches1[0] || null;
+    const item2 = matches2[0] || null;
+
+    if (!item1 || !item2 || String(item1.stableId) === String(item2.stableId)) {
+      return {
+        data: {
+          finalResponse: notFoundMsg,
+          formatted: notFoundMsg,
+          response: notFoundMsg,
+          pendingCompare: null,
+        },
+        tokensUsed: 0,
+        next: node.config?.next || 'response_sender',
+      };
+    }
+
+    return await this.runBikeComparison(item1, item2, language, node);
+  }
+
+  /**
+   * GPT comparison for two ledger items (side-by-side table + pros/cons).
+   */
+  async runBikeComparison(item1, item2, language, node) {
+    const notFoundTpl = this.workflow.templates?.compare_bikes_not_found;
+    const notFoundMsg =
+      notFoundTpl?.[language] ||
+      notFoundTpl?.english ||
+      'Please pick two bikes from the current list to compare.';
+
+    const p1 = item1.raw || {};
+    const p2 = item2.raw || {};
+
+    const systemPrompt = `You are a motorcycle sales assistant. Compare two motorcycles side by side in ${language}.
+Output format:
+1. A clear side-by-side comparison table with these rows: Price, Engine, Type, Weight, Fuel Tank, Fuel System, Transmission, Availability
+2. Pros of bike 1 (3 bullet points max)
+3. Cons of bike 1 (2 bullet points max)
+4. Pros of bike 2 (3 bullet points max)
+5. Cons of bike 2 (2 bullet points max)
+6. One sentence recommendation based on the differences.
+Keep it concise and friendly. Use WhatsApp formatting (*bold* for headers).`;
+
+    const userPrompt = `Compare these two motorcycles:
+
+Bike 1: ${p1.name || item1.title}
+Price: ${p1.currency || 'MYR'} ${p1.price ?? '-'}
+${JSON.stringify(p1.features || {})}
+
+Bike 2: ${p2.name || item2.title}
+Price: ${p2.currency || 'MYR'} ${p2.price ?? '-'}
+${JSON.stringify(p2.features || {})}`;
+
+    try {
+      const completion = await openai.chat.completions.create({
+        model: this.optimizerRoleConfig.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.3,
+        max_tokens: 600,
+      });
+
+      const response = completion.choices?.[0]?.message?.content || notFoundMsg;
+      const tokensUsed = completion.usage?.total_tokens || 0;
+
+      return {
+        data: {
+          finalResponse: response,
+          formatted: response,
+          response,
+          product1: p1,
+          product2: p2,
+          pendingCompare: null,
+        },
+        tokensUsed,
+        next: node.config?.next || 'response_sender',
+      };
+    } catch (error) {
+      console.error('[CompareBikes] LLM error:', error.message);
+      const fallback = `Here's a quick comparison:\n\n*${p1.name || item1.title}*\nPrice: ${p1.currency || 'MYR'} ${p1.price ?? '-'}\nEngine: ${p1.features?.engineSize || p1.features?.engine || '-'}\n\n*${p2.name || item2.title}*\nPrice: ${p2.currency || 'MYR'} ${p2.price ?? '-'}\nEngine: ${p2.features?.engineSize || p2.features?.engine || '-'}`;
+      return {
+        data: {
+          finalResponse: fallback,
+          formatted: fallback,
+          response: fallback,
+          pendingCompare: null,
+        },
+        tokensUsed: 0,
+        next: node.config?.next || 'response_sender',
+      };
+    }
+  }
+
+  /**
+   * Parse two references from a compare message.
+   * When the latest list has exactly 2 items, phrases like "these two" or bare "compare"
+   * auto-resolve to items 1 and 2.
+   */
+  parseCompareRefs(message, latestSet = null) {
+    const msg = message.toLowerCase();
+
+    const autoCompareWords =
+      /\b(these two|both|these|the two|compare both|compare these|二者|两个|这两个)\b/i;
+    if (autoCompareWords.test(msg) && latestSet?.items?.length === 2) {
+      return ['1', '2'];
+    }
+
+    if (/compare|bandingkan|比较/i.test(msg) && latestSet?.items?.length === 2) {
+      const hasNumber = /\b[1-9]\b/.test(msg);
+      const hasBikeName = latestSet.items.some(it => {
+        const title = String(it.title || '').toLowerCase();
+        const name = String(it.raw?.name || '').toLowerCase();
+        return (title.length >= 2 && msg.includes(title)) || (name.length >= 2 && msg.includes(name));
+      });
+      if (!hasNumber && !hasBikeName) {
+        return ['1', '2'];
+      }
+    }
+
+    const patterns = [
+      /compare\s+(.+?)\s+(?:and|vs\.?|versus|atau)\s+(.+)/i,
+      /(.+?)\s+(?:vs\.?|versus)\s+(.+)/i,
+      /which\s+(?:is\s+)?better[,:]?\s+(.+?)\s+(?:or|atau)\s+(.+)/i,
+      /bandingkan\s+(.+?)\s+(?:dan|dengan|vs)\s+(.+)/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = message.match(pattern);
+      if (match) {
+        return [match[1].trim(), match[2].trim()];
+      }
+    }
+
+    const numbers = message.match(/\b[1-9]\b/g);
+    if (numbers && numbers.length >= 2) {
+      return [numbers[0], numbers[1]];
+    }
+
+    return [null, null];
   }
 
   /**

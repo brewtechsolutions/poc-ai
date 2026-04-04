@@ -71,6 +71,7 @@
             "more_options",
             "model_selection",
             "clarify_selection",
+            "compare_bikes",
             "more_details",
             "price_inquiry",
             "budget_question",
@@ -146,6 +147,11 @@
               "flags": "i",
               "intent": "goodbye",
               "maxLength": 30
+            },
+            {
+              "pattern": "compare|versus|vs\\\\.?|which is better|which one is better|bandingkan",
+              "flags": "i",
+              "intent": "compare_bikes"
             }
           ],
           "next": "analysis_router"
@@ -169,6 +175,7 @@
             { "intent": "more_details", "next": "more_details_handler" },
             { "intent": "model_selection", "next": "model_details_handler" },
             { "intent": "clarify_selection", "next": "selection_clarify_handler" },
+            { "intent": "compare_bikes", "next": "compare_bikes_handler" },
             { "intent": "price_inquiry", "next": "price_lookup" },
             { "intent": "budget_question", "next": "budget_handler" },
             { "intent": "area_question", "next": "area_handler" },
@@ -620,7 +627,15 @@
         "type": "selection_clarify",
         "name": "Selection Clarify",
         "config": {
-          "next": "response_optimizer"
+          "next": "response_sender"
+        }
+      },
+      {
+        "id": "compare_bikes_handler",
+        "type": "compare_bikes",
+        "name": "Compare Bikes Handler",
+        "config": {
+          "next": "response_sender"
         }
       },
       {
@@ -847,6 +862,11 @@
         "english": "I'm sorry, we don't have this model. Would you like to see other bikes we have?",
         "malay": "Maaf, kami tidak ada model ini. Adakah anda ingin lihat motosikal lain yang kami ada?",
         "chinese": "抱歉，我们没有这款型号。您想看看我们其他的摩托车吗？"
+      },
+      "compare_bikes_not_found": {
+        "english": "Sorry, I couldn't find those bikes in the current list. Please pick two numbers or names from the list I showed you.",
+        "malay": "Maaf, saya tak jumpa motosikal tersebut dalam senarai semasa. Sila pilih dua nombor atau nama dari senarai yang saya tunjukkan.",
+        "chinese": "抱歉，我在当前列表中找不到那些摩托车。请从我展示的列表中选择两个编号或名称。"
       },
       "clarification_questions": {
         "english": "To give you the best recommendations, please reply with these items (you can answer in one line):\n\n1) **Budget (RM)** – e.g. RM 5,000 – RM 8,000\n2) **Area / Location** – e.g. Puchong, PJ, KL\n3) **Preferred model / brand (optional)** – e.g. any 150cc scooter / kapcai you like\n\nExample reply:\nRM 5,000, Puchong, 150cc scooter",
