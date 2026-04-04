@@ -96,7 +96,8 @@
             { "name": "model", "type": "string" },
             { "name": "brand", "type": "string" },
             { "name": "product_type", "type": "string" },
-            { "name": "selected_index", "type": "integer" }
+            { "name": "selected_index", "type": "integer" },
+            { "name": "compare_scope", "type": "string" }
           ],
           "languages": ["english", "malay", "chinese"],
           "fallback_intent": "product_recommendation",
@@ -149,9 +150,41 @@
               "maxLength": 30
             },
             {
+              "pattern": "^(show\\s+me\\s+)?(the\\s+)?list(!|\\.|\\?)?$|^show\\s+list\\b|^show\\s+(me\\s+)?(the\\s+)?options\\b|^senarai(\\s+lagi)?$|^列表",
+              "flags": "i",
+              "intent": "more_options"
+            },
+            {
               "pattern": "compare|versus|vs\\\\.?|which is better|which one is better|bandingkan",
               "flags": "i",
               "intent": "compare_bikes"
+            }
+          ],
+          "compare_mode_rules": [
+            {
+              "pattern": "\\bcompare\\s+all\\b",
+              "flags": "i",
+              "compare_scope": "all"
+            },
+            {
+              "pattern": "\\bcompare\\s+everything\\b",
+              "flags": "i",
+              "compare_scope": "all"
+            },
+            {
+              "pattern": "\\bcompare\\s+(them\\s+)?all\\b",
+              "flags": "i",
+              "compare_scope": "all"
+            },
+            {
+              "pattern": "bandingkan\\s+semua",
+              "flags": "i",
+              "compare_scope": "all"
+            },
+            {
+              "pattern": "比较全部|比较所有",
+              "flags": "i",
+              "compare_scope": "all"
             }
           ],
           "next": "analysis_router"

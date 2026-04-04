@@ -48,7 +48,8 @@ export const SKILLS = {
     prompt: `
 ## Skill: Context Memory
 - Use conversationHistory to interpret "2" (model selection), "got others?" (more_options), "yes"/"要" (follow last intent).
-- If the last bot message asked for language/budget/area/model and user replies with a short answer, map it to the right intent and entities.`,
+- If the last bot message asked for language/budget/area/model and user replies with a short answer, map it to the right intent and entities.
+- Asking to SEE or REPEAT the bike list is NOT a compare: "show me the list", "show the list", "show list", "list again", "what bikes did you show", "senarai lagi", "列表呢" → intent **more_options** (or bike_recommendation if budget/area still missing). Never set compare_bikes or entities.compare_scope for these — compare_bikes is only when they explicitly compare models or say "compare all".`,
   },
   escalation_radar: {
     name: 'escalation_radar',
@@ -235,32 +236,18 @@ class AnalysisAgent {
    */
   static fastPath(context, config = {}) {
     const message = (context.user_message || '').trim();
+    const trimmed = message;
 
-    for (const rule of (config.fast_path_rules || [])) {
-      if (!rule || !rule.pattern || !rule.intent) continue;
-      if (rule.maxLength && message.length > rule.maxLength) continue;
-      try {
-        const regex = new RegExp(rule.pattern, rule.flags || '');
-        if (!regex.test(message)) continue;
-        if (DEBUG) console.log('[AnalysisAgent] fastPath:', rule.intent);
-        return this._makeFastResult(rule.intent, {}, context, config);
-      } catch (err) {
-        if (DEBUG) console.warn('[AnalysisAgent] Invalid fast_path_rule regex:', rule.pattern, err.message);
-      }
-    }
-
-    // Model selection via option history ledger (newest matching set first)
     const optionSets = context.optionSets || context.metadata?.optionSets;
     const hasLedger = Array.isArray(optionSets) && optionSets.length > 0;
-    const trimmed = message.trim();
     const isNumericPick = /^[1-9]\d*\.?$/.test(trimmed);
     const isNamePick =
       trimmed.length > 1 &&
       trimmed.length <= 80 &&
       !trimmed.includes('?') &&
       !isNumericPick;
-
     const hasCompareKeyword = /compare|vs\.?|versus|bandingkan|比较/i.test(trimmed);
+
     if (context.pendingCompare && hasCompareKeyword) {
       if (DEBUG) {
         console.log('[AnalysisAgent] fastPath: new compare request detected, clearing pendingCompare');
@@ -268,7 +255,6 @@ class AnalysisAgent {
       context.pendingCompare = null;
     }
 
-    // Pending compare clarification: one pick (number / short ref), not a new compare request
     if (context.pendingCompare) {
       const looksLikeComparePhrase =
         /\b(compare|versus|vs\.?|bandingkan)\b/i.test(trimmed) ||
@@ -290,6 +276,44 @@ class AnalysisAgent {
       }
     }
 
+    // Compare modes (e.g. "compare all") before generic `compare` fast_path_rule — otherwise the
+    // broad compare pattern wins first and we lose entities.compare_scope.
+    for (const rule of config.compare_mode_rules || []) {
+      if (!rule?.pattern || !rule.compare_scope) continue;
+      if (!hasLedger) continue;
+      try {
+        const re = new RegExp(rule.pattern, rule.flags || 'i');
+        if (!re.test(trimmed)) continue;
+        if (DEBUG) {
+          console.log('[AnalysisAgent] fastPath: compare mode', rule.compare_scope);
+        }
+        return this._makeFastResult(
+          'compare_bikes',
+          { ...(context.entities || {}), compare_scope: rule.compare_scope },
+          context,
+          config,
+        );
+      } catch (err) {
+        if (DEBUG) {
+          console.warn('[AnalysisAgent] Invalid compare_mode_rule regex:', rule.pattern, err.message);
+        }
+      }
+    }
+
+    for (const rule of (config.fast_path_rules || [])) {
+      if (!rule || !rule.pattern || !rule.intent) continue;
+      if (rule.maxLength && message.length > rule.maxLength) continue;
+      try {
+        const regex = new RegExp(rule.pattern, rule.flags || '');
+        if (!regex.test(message)) continue;
+        if (DEBUG) console.log('[AnalysisAgent] fastPath:', rule.intent);
+        return this._makeFastResult(rule.intent, {}, context, config);
+      } catch (err) {
+        if (DEBUG) console.warn('[AnalysisAgent] Invalid fast_path_rule regex:', rule.pattern, err.message);
+      }
+    }
+
+    // Model selection via option history ledger (newest matching set first)
     if (hasLedger && (isNumericPick || isNamePick)) {
       const latestSet = optionSets[optionSets.length - 1];
 

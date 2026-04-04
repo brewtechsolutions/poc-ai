@@ -233,8 +233,10 @@ router.post('/api/test-chat', async (req, res) => {
     // Update conversation metadata in DB
     // Use the *last* step that returned products so the ledger matches the most recent list shown
     // (find() alone returns the first match and can append the wrong batch to optionSets).
+    // Prefer the last step that actually returned bikes — some nodes include `products: []`,
+    // which would otherwise win as "last" and skip ledger / lastShown updates (breaks "compare all").
     const productSteps = (result.allResults || []).filter(
-      (r) => r.data?.products && Array.isArray(r.data.products),
+      (r) => Array.isArray(r.data?.products) && r.data.products.length > 0,
     );
     const productsFromResult = productSteps[productSteps.length - 1]?.data?.products;
 

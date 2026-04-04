@@ -33,6 +33,25 @@ class WorkflowEngine {
     });
   }
 
+  getAnalysisAgentConfig() {
+    return this.nodes.get('analysis_agent')?.config || {};
+  }
+
+  /** Match user message against `compare_mode_rules` in workflow (e.g. compare_scope: "all"). */
+  messageMatchesCompareMode(message, scope) {
+    const rules = this.getAnalysisAgentConfig().compare_mode_rules || [];
+    const t = String(message || '').trim();
+    for (const rule of rules) {
+      if (!rule?.pattern || rule.compare_scope !== scope) continue;
+      try {
+        if (new RegExp(rule.pattern, rule.flags || 'i').test(t)) return true;
+      } catch (_) {
+        /* invalid regex in config */
+      }
+    }
+    return false;
+  }
+
   /**
    * Execute workflow from start node
    */
@@ -400,6 +419,11 @@ class WorkflowEngine {
       turnOnly && typeof turnOnly === 'object' && Object.keys(turnOnly).length > 0
         ? { ...(context.entities || {}), ...turnOnly }
         : context.entities || {};
+    // Session cache can still hold compare_scope from a prior "compare all" turn. Empty fast-path
+    // entities ({}) must not inherit it — otherwise "compare yamaha and honda" runs compare-all.
+    if (turnOnly?.compare_scope == null) {
+      delete entities.compare_scope;
+    }
 
     const notFoundTpl = this.workflow.templates?.compare_bikes_not_found;
     const notFoundMsg =
@@ -495,7 +519,22 @@ class WorkflowEngine {
       return await this.runBikeComparison(resolvedItem, clarifiedItem, language, node);
     }
 
+    const wantsCompareAll =
+      entities.compare_scope === 'all' || this.messageMatchesCompareMode(message, 'all');
+    if (wantsCompareAll && latestSet.items.length >= 2) {
+      return await this.runBikeComparisonMany(latestSet.items, language, node);
+    }
+
     const refs = this.parseCompareRefs(message, latestSet);
+
+    /** Common typos like "mmodenas" → try "modenas" by collapsing repeated letters. */
+    const refMatchVariants = (raw) => {
+      const q0 = String(raw || '')
+        .toLowerCase()
+        .trim();
+      const collapsed = q0.replace(/(.)\1+/g, '$1');
+      return collapsed !== q0 ? [q0, collapsed] : [q0];
+    };
 
     const resolveRef = (ref) => {
       if (!ref) return [];
@@ -504,17 +543,20 @@ class WorkflowEngine {
         const item = latestSet.items.find(it => it.displayIndex === num);
         return item ? [item] : [];
       }
-      const q = ref.toLowerCase();
       const seen = new Set();
       const matches = [];
-      for (const it of latestSet.items) {
-        const title = String(it.title || '').toLowerCase();
-        const name = String(it.raw?.name || '').toLowerCase();
-        if (!title.includes(q) && !name.includes(q)) continue;
-        const id = String(it.stableId ?? `${it.displayIndex}`);
-        if (seen.has(id)) continue;
-        seen.add(id);
-        matches.push(it);
+      for (const q of refMatchVariants(ref)) {
+        for (const it of latestSet.items) {
+          const title = String(it.title || '').toLowerCase();
+          const name = String(it.raw?.name || '').toLowerCase();
+          const brand = String(it.raw?.brand || '').toLowerCase();
+          if (!title.includes(q) && !name.includes(q) && !brand.includes(q)) continue;
+          const id = String(it.stableId ?? `${it.displayIndex}`);
+          if (seen.has(id)) continue;
+          seen.add(id);
+          matches.push(it);
+        }
+        if (matches.length > 0) break;
       }
       return matches;
     };
@@ -578,59 +620,73 @@ class WorkflowEngine {
   }
 
   /**
-   * GPT comparison for two ledger items (side-by-side table + pros/cons).
+   * GPT comparison for two ledger items — delegates to {@link runBikeComparisonMany}.
    */
   async runBikeComparison(item1, item2, language, node) {
+    return this.runBikeComparisonMany([item1, item2], language, node);
+  }
+
+  /**
+   * GPT comparison for N ledger items (N >= 2). Prompts scale with list size — no fixed "two bikes only" logic.
+   */
+  async runBikeComparisonMany(items, language, node) {
     const notFoundTpl = this.workflow.templates?.compare_bikes_not_found;
     const notFoundMsg =
       notFoundTpl?.[language] ||
       notFoundTpl?.english ||
       'Please pick two bikes from the current list to compare.';
+    const n = Array.isArray(items) ? items.length : 0;
+    if (n < 2) {
+      return {
+        data: {
+          finalResponse: notFoundMsg,
+          formatted: notFoundMsg,
+          response: notFoundMsg,
+          pendingCompare: null,
+        },
+        tokensUsed: 0,
+        next: node.config?.next || 'response_sender',
+      };
+    }
 
-    const p1 = item1.raw || {};
-    const p2 = item2.raw || {};
+    const systemPrompt = `You are a motorcycle sales assistant. The user asked to compare ${n} motorcycles from their list together. Write entirely in ${language}.
+Output for WhatsApp:
+1. One *comparison table*: columns = each model name; rows = Price, Engine, Type, Weight (if known), Fuel / fuel system, Transmission, Availability — use *bold* for row labels.
+2. *Quick take*: one short bullet per model (best fit / who it suits), max ${n} bullets.
+3. One closing sentence to help choose.
+Stay concise when ${n} is large; skip filler.`;
 
-    const systemPrompt = `You are a motorcycle sales assistant. Compare two motorcycles side by side in ${language}.
-Output format:
-1. A clear side-by-side comparison table with these rows: Price, Engine, Type, Weight, Fuel Tank, Fuel System, Transmission, Availability
-2. Pros of bike 1 (3 bullet points max)
-3. Cons of bike 1 (2 bullet points max)
-4. Pros of bike 2 (3 bullet points max)
-5. Cons of bike 2 (2 bullet points max)
-6. One sentence recommendation based on the differences.
-Keep it concise and friendly. Use WhatsApp formatting (*bold* for headers).`;
+    const userPrompt = items
+      .map((it, i) => {
+        const p = it.raw || {};
+        return `— Bike ${i + 1} (list #${it.displayIndex}: ${it.title})\nName: ${p.name || it.title}\nPrice: ${p.currency || 'MYR'} ${p.price ?? '-'}\nFeatures JSON: ${JSON.stringify(p.features || {})}`;
+      })
+      .join('\n\n');
 
-    const userPrompt = `Compare these two motorcycles:
-
-Bike 1: ${p1.name || item1.title}
-Price: ${p1.currency || 'MYR'} ${p1.price ?? '-'}
-${JSON.stringify(p1.features || {})}
-
-Bike 2: ${p2.name || item2.title}
-Price: ${p2.currency || 'MYR'} ${p2.price ?? '-'}
-${JSON.stringify(p2.features || {})}`;
+    const maxTokens = Math.min(4096, 450 + n * 220);
 
     try {
       const completion = await openai.chat.completions.create({
         model: this.optimizerRoleConfig.model,
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
+          { role: 'user', content: `Compare all of these motorcycles:\n\n${userPrompt}` },
         ],
         temperature: 0.3,
-        max_tokens: 600,
+        max_tokens: maxTokens,
       });
 
       const response = completion.choices?.[0]?.message?.content || notFoundMsg;
       const tokensUsed = completion.usage?.total_tokens || 0;
+      const raws = items.map(it => it.raw).filter(Boolean);
 
       return {
         data: {
           finalResponse: response,
           formatted: response,
           response,
-          product1: p1,
-          product2: p2,
+          productsCompared: raws,
+          productCount: n,
           pendingCompare: null,
         },
         tokensUsed,
@@ -638,7 +694,12 @@ ${JSON.stringify(p2.features || {})}`;
       };
     } catch (error) {
       console.error('[CompareBikes] LLM error:', error.message);
-      const fallback = `Here's a quick comparison:\n\n*${p1.name || item1.title}*\nPrice: ${p1.currency || 'MYR'} ${p1.price ?? '-'}\nEngine: ${p1.features?.engineSize || p1.features?.engine || '-'}\n\n*${p2.name || item2.title}*\nPrice: ${p2.currency || 'MYR'} ${p2.price ?? '-'}\nEngine: ${p2.features?.engineSize || p2.features?.engine || '-'}`;
+      const lines = items.map(it => {
+        const p = it.raw || {};
+        const eng = p.features?.engineSize || p.features?.engine || '-';
+        return `*${p.name || it.title}* — ${p.currency || 'MYR'} ${p.price ?? '-'} | ${eng}`;
+      });
+      const fallback = `Quick comparison:\n\n${lines.join('\n')}`;
       return {
         data: {
           finalResponse: fallback,
@@ -1042,6 +1103,10 @@ ${JSON.stringify(p2.features || {})}`;
     });
     const tokensUsed = plan.tokensUsed ?? 0;
     context.entities = { ...(context.entities || {}), ...(plan.entities || {}) };
+    // Turn-scoped: only keep compare_scope if this analysis run set it (avoids stale session value).
+    if (!Object.prototype.hasOwnProperty.call(plan.entities || {}, 'compare_scope')) {
+      delete context.entities.compare_scope;
+    }
     if (plan.hasAskedBudget !== undefined) context.hasAskedBudget = plan.hasAskedBudget;
     if (plan.hasAskedArea !== undefined) context.hasAskedArea = plan.hasAskedArea;
     if (plan.hasAskedModel !== undefined) context.hasAskedModel = plan.hasAskedModel;
