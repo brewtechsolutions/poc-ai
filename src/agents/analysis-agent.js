@@ -437,6 +437,83 @@ class AnalysisAgent {
     return null;
   }
 
+  /**
+   * AI-powered fast-path classifier - uses LLM for common patterns with context awareness.
+   * Replaces regex-based fast_path_rules with intelligent interpretation when enabled.
+   * @param {string} userMessage - The user message
+   * @param {object} context - Conversation context (phase, pendingQuestions, lastEntities, etc.)
+   * @param {object} config - Workflow config
+   * @returns {Promise<object|null>} Result with intent/entities or null if confidence too low
+   */
+  static async handleAIFastPath(userMessage, context = {}, config = {}) {
+    const { useAIFastPath } = config;
+    if (useAIFastPath === false) return null;
+
+    try {
+      const roleConfig = getRoleConfig(AI_ROLES.ANALYZER);
+
+      const contextPrompt = context
+        ? `\nCurrent conversation phase: ${context.conversationPhase || context.phase || 'initial'}
+Pending questions: ${(context.pendingQuestions || []).map(q => q.question).join('; ') || 'none'}
+Last entities: ${JSON.stringify(context.lastEntities || context.entities || {})}`
+        : '';
+
+      const systemPrompt = `You are a fast-path classifier for a motorcycle sales chatbot.
+Determine if this message matches a known fast-path pattern.
+
+Fast-path patterns:
+1. GREETING - hello, hi, hey, good morning/afternoon/evening
+2. THANKS - thank you, thanks, appreciate
+3. GOODBYE - bye, goodbye, see you, take care
+4. CONFIRMATION - yes, yeah, yup, correct, right, ok, okay
+5. NEGATION - no, nope, not, never
+6. REPEAT - show me again, what was, repeat, lagi, sekali lagi
+7. COMPARE_REQUEST - compare, bandingkan, versus, vs, between
+8. BUDGET_STATEMENT - budget is, within, around, kurang dari, lebih dari, rm5000, rm10k
+9. BRAND_INTEREST - like honda, prefer toyota (but motorcycle brands),感兴趣的
+10. MODEL_REQUEST - what is, tell me about, details, specs
+11. AVAILABILITY - ada, available, in stock, tersedia
+12. PRICE_ASK - harga, price, cost, berapa ringgit
+13. TEST_RIDE - test ride, try, проба
+14. FINANCING - loan, financing, installment, ansuran,耐性
+15. TRADE_IN - trade in, tukar, exchange, barter
+16. LOCATION - where, location, address, tempat, located
+17. CHITCHAT - not motorcycle related
+18. MODEL_SELECTION - when user selects from numbered list by number or name
+
+${contextPrompt}
+
+User message: "${userMessage}"
+Language hint: ${context.language || 'english'}
+
+Respond with JSON only:
+{
+  "pattern": "PATTERN_NAME or null",
+  "confidence": 0.0-1.0,
+  "extractedEntities": {},
+  "reasoning": "brief explanation"
+}
+
+If confidence < 0.75, respond with pattern: null.`;
+
+      const completion = await openai.chat.completions.create({
+        model: roleConfig.model || 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMessage }
+        ],
+        temperature: 0.3,
+        max_tokens: 200
+      });
+
+      const result = JSON.parse(completion.choices[0].message.content);
+      return result;
+    } catch (err) {
+      if (DEBUG) console.warn('[AnalysisAgent] AI fast-path failed, falling back to rules:', err.message);
+      return null;
+    }
+  }
+
   static _makeFastResult(intent, entities, context, config = {}) {
     return {
       intent,
@@ -504,13 +581,37 @@ Conversation language: ${lang}. Last intent: ${context.lastIntent || 'none'}. Ex
   }
 
   /**
-   * Analyze user message with full conversation context. Tries fast path first, then LLM.
+   * Analyze user message with full conversation context. Tries AI fast-path first, then rule fast-path, then LLM.
    * @param {object} context - Same as workflow executionContext (user_message, conversationHistory, entities, lastIntent, lastShownProducts, language, hasAskedBudget, hasAskedArea, hasAskedModel, skipAlreadyShownIds)
    * @param {object} options - { activeSkills: string[], nodes: Map } (nodes optional, for future use)
    * @returns {Promise<object>} Plan: intent, entities, language, confidence, suggestedQuestion, missingInfo, hasAskedBudget, hasAskedArea, hasAskedModel, salesInsight, skipAlreadyShownIds, source.
    */
   static async analyze(context, options = {}) {
     const config = options.config || {}; // Config from workflow.json node.config
+
+    // Try AI fast-path first for better context awareness
+    const aiFastPath = await this.handleAIFastPath(context.user_message, context, config);
+    if (aiFastPath?.pattern && aiFastPath?.confidence >= 0.75) {
+      if (DEBUG) console.log('[AnalysisAgent] AI fast-path matched:', aiFastPath.pattern, aiFastPath.confidence);
+      return {
+        intent: aiFastPath.pattern,
+        entities: { ...(context.entities || {}), ...(aiFastPath.extractedEntities || {}) },
+        language: context.language || config.languages?.[0] || 'english',
+        confidence: aiFastPath.confidence,
+        suggestedQuestion: null,
+        missingInfo: [],
+        hasAskedBudget: context.hasAskedBudget || false,
+        hasAskedArea: context.hasAskedArea || false,
+        hasAskedModel: context.hasAskedModel || false,
+        salesInsight: null,
+        skipAlreadyShownIds: [],
+        source: 'ai_fast_path',
+        reasoning: aiFastPath.reasoning,
+        tokensUsed: 0,
+      };
+    }
+
+    // Fall back to rule-based fast path
     const fast = this.fastPath(context, config);
     if (fast) return fast;
 
