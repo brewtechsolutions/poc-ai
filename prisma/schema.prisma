@@ -50,15 +50,23 @@ model User {
   name          String?
   preferences   Json?    // User preferences, past purchases, etc.
   conversationHistory Json? // Recent conversation context
-  
+
   conversations Conversation[]
   orders        Order[]
   views         ProductView[]
-  
+
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
-  
+
   @@index([phoneNumber])
+}
+
+enum ConversationPhase {
+  initial
+  browsing
+  comparing
+  negotiating
+  closing
 }
 
 // Conversation logging
@@ -66,9 +74,9 @@ model Conversation {
   id            String   @id @default(uuid())
   userId        String
   user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
+
   messages      Message[]
-  
+
   intent        String?
   entities      Json?
   optionSets    Json     @default("[]")
@@ -78,10 +86,19 @@ model Conversation {
   agentId       String?
   tokensUsed    Int      @default(0)
   responseTime  Int?     // Response time in ms
-  
+
+  // Memory fields for AI context
+  conversationHistory Json?   @default("[]") // Full message history with roles
+  memorySnapshot     Json?   @default("{}") // AI-relevant context: preferences, pending topics, unresolved ambiguities
+  lastAiInterpretation String? // Last intent interpretation for debugging
+  lastEntitiesRaw     Json?   @default("{}") // Raw entities before merging
+  conversationPhase   ConversationPhase? @default(initial) // initial, browsing, comparing, negotiating, closing
+  pendingQuestions    Json?   @default("[]") // Questions the AI has asked that are awaiting answers
+  contextTags         String[] @default([]) // Tags: [budget_aware, brand_loyal, financing_interested, trade_in_pending]
+
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
-  
+
   @@index([userId])
   @@index([createdAt])
 }
