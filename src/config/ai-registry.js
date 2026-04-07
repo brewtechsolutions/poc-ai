@@ -21,6 +21,7 @@ export const AI_ROLES = {
   ESCALATOR: 'escalator',          // Agent escalation handling
   VISION: 'vision',                // Image analysis
   SPEECH: 'speech',                // Voice transcription
+  MEMORY: 'memory',                // Memory management and context updates
 };
 
 /**
@@ -34,6 +35,7 @@ export const MODEL_ASSIGNMENTS = {
   [AI_ROLES.ESCALATOR]: process.env.ESCALATOR_MODEL || 'gpt-4o-mini',
   [AI_ROLES.VISION]: process.env.VISION_MODEL || 'gpt-4o',
   [AI_ROLES.SPEECH]: process.env.SPEECH_MODEL || 'whisper-1',
+  [AI_ROLES.MEMORY]: process.env.MEMORY_MODEL || 'gpt-4o-mini',
   // Router, Retriever, Formatter, Responder don't use LLM directly
   [AI_ROLES.ROUTER]: null,
   [AI_ROLES.RETRIEVER]: null,
@@ -50,6 +52,7 @@ export const TEMPERATURE_SETTINGS = {
   [AI_ROLES.OPTIMIZER]: TOKEN_CONFIG.TEMPERATURE.BALANCED,   // 0.3 - natural but controlled
   [AI_ROLES.ESCALATOR]: TOKEN_CONFIG.TEMPERATURE.STRICT,     // 0.2 - precise escalation
   [AI_ROLES.VISION]: TOKEN_CONFIG.TEMPERATURE.STRICT,        // 0.2 - accurate image analysis
+  [AI_ROLES.MEMORY]: TOKEN_CONFIG.TEMPERATURE.STRICT,        // 0.2 - precise memory updates
 };
 
 /**
@@ -61,6 +64,7 @@ export const MAX_TOKENS_SETTINGS = {
   [AI_ROLES.OPTIMIZER]: 600,       // Response optimization
   [AI_ROLES.ESCALATOR]: 200,       // Escalation messages
   [AI_ROLES.VISION]: 500,          // Image analysis
+  [AI_ROLES.MEMORY]: 500,          // Memory update operations
 };
 
 /**
