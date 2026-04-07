@@ -2,8 +2,13 @@ import express from 'express';
 import WorkflowEngine from '../core/workflow-engine.js';
 import { appendOptionSet } from '../utils/session-option-sets.js';
 import prisma from '../config/database.js';
+import openai from '../config/openai.js';
+import { MemoryAgent } from '../agents/memory-agent.js';
 
 const router = express.Router();
+
+// Initialize Memory Agent for conversation context persistence
+const memoryAgent = new MemoryAgent(openai);
 
 // In-memory cache for non-DB session state (option sets, entities, etc.)
 // This is fine for POC - these are runtime state, not conversation history
