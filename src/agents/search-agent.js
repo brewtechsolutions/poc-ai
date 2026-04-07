@@ -750,6 +750,80 @@ Rank products by relevance. Return JSON with: products (array with id/name, rele
     };
   }
 
+  /**
+   * AI-powered product ranking with multi-constraint handling.
+   * Replaces complex filter chains with intelligent ranking when constraints are ambiguous.
+   *
+   * @param {string} userQuery - Original user query
+   * @param {object} context - { entities, phase, lastShownProducts, language }
+   * @param {Array} productPool - Products to rank
+   * @param {number} topN - Number of products to return
+   * @returns {Promise<object>} { rankedProducts, constraintsMatched, missingConstraints, recommendation }
+   */
+  static async handleAIRanking(userQuery, context, productPool, topN = 5) {
+    const entities = context.entities || {};
+    const systemPrompt = `You are a product recommendation specialist for a motorcycle dealership.
+
+Given a user request and context, rank the available products from most relevant to least relevant.
+
+User request: "${userQuery}"
+Context: ${JSON.stringify({
+  phase: context.phase,
+  budget: entities.budget,
+  area: entities.area,
+  brand: entities.brand,
+  model: entities.model,
+  language: context.language,
+  lastShownProducts: context.lastShownProducts?.length || 0
+})}
+
+Available products (JSON array, max 30):
+${JSON.stringify(productPool.slice(0, 30).map(p => ({
+  id: p.id,
+  name: p.name,
+  brand: p.brand,
+  price: p.price,
+  category: p.category
+})), null, 2)}
+
+Ranking criteria (consider ALL):
+1. Match to user stated preferences (brand, type, model)
+2. Budget compatibility (under or closest to budget)
+3. User's stated use case (city, touring, sport)
+4. Availability in requested area
+5. Recent conversation context (what they were shown before)
+6. Implicit preferences (language hints, questions asked)
+
+Respond with JSON:
+{
+  "rankedProducts": [
+    { "id": "product_id", "rank": 1, "reasoning": "why this product is ranked first" },
+    ...
+  ],
+  "constraintsMatched": { "budget": true, "brand": false, "type": true },
+  "missingConstraints": ["budget was not specified"],
+  "recommendation": "brief recommendation for the top product"
+}`;
+
+    try {
+      const rankerConfig = getRoleConfig(AI_ROLES.RANKER);
+      const completion = await openai.chat.completions.create({
+        model: rankerConfig.model || 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userQuery }
+        ],
+        temperature: 0.4,
+        max_tokens: 1000
+      });
+
+      return JSON.parse(completion.choices[0].message.content);
+    } catch (err) {
+      console.error('[SearchAgent] AI ranking failed:', err.message);
+      return null;
+    }
+  }
+
 }
 
 export default SearchAgent;
