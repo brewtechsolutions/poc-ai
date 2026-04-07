@@ -123,6 +123,58 @@ class LanguageAgent {
   }
 
   /**
+   * AI-powered model name extraction.
+   * Replaces regex with LLM named entity recognition for better accuracy with typos, variants, and language variations.
+   *
+   * @param {string} userMessage - User message
+   * @param {string} language - Language code
+   * @returns {Promise<object>} { modelsFound, confidence, reasoning }
+   */
+  static async extractModelWithAI(userMessage, language = 'en') {
+    const systemPrompt = `Extract motorcycle model names from the user message.
+
+Known motorcycle brands/models in Malaysia:
+- Honda: CB150R, CB250R, CBR150R, CBR250RR, Wave, Dream, Civic (car), HR-V (car)
+- Yamaha: MT-15, MT-03, YZF-R15, YZF-R3, XSR155, FXZ, Lexi, Aerox, Ego, Ego S, NMAX, NVX
+- Suzuki: GSX-S150, GSX-R150, V-Strom 650, Hayabusa
+- Kawasaki: Ninja 250, Z250, Versys 650, Z900
+- TVS: Apache RTR 160, Apache RR 310
+- Ducati: Panigale V4, Monster 821, Scrambler
+- BMW: G310R, G310GS, S1000RR
+- Modenas: Pulsar NS200, Discover 125
+
+User message: "${userMessage}"
+Language: ${language}
+
+Extract ALL motorcycle model names mentioned. Return null if no motorcycle model found.
+
+Respond with JSON:
+{
+  "modelsFound": ["model1", "model2"], // empty if none
+  "confidence": 0.0-1.0,
+  "reasoning": "brief explanation"
+}`;
+
+    try {
+      const { AI_ROLES, getRoleConfig } = await import('../config/ai-registry.js');
+      const completion = await openai.chat.completions.create({
+        model: getRoleConfig(AI_ROLES.ANALYZER).model || 'gpt-4o',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMessage }
+        ],
+        temperature: 0.1,
+        max_tokens: 100
+      });
+
+      return JSON.parse(completion.choices[0].message.content);
+    } catch (err) {
+      console.warn('[LanguageAgent] AI model extraction failed:', err.message);
+      return { modelsFound: [], confidence: 0, reasoning: err.message };
+    }
+  }
+
+  /**
    * Detect "budget, area, model" reply (e.g. "RM 5,000, Puchong, Yamaha Ego") and parse without calling API.
    * Returns null if message doesn't match this format.
    * Handles comma inside budget (e.g. 5,000) by extracting budget first, then splitting the rest for area/model.
