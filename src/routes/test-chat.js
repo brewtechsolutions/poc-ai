@@ -4,11 +4,47 @@ import { appendOptionSet } from '../utils/session-option-sets.js';
 import prisma from '../config/database.js';
 import openai from '../config/openai.js';
 import { MemoryAgent } from '../agents/memory-agent.js';
+import { buildFullContext, buildContextSummary } from '../utils/context-builder.js';
 
 const router = express.Router();
 
 // Initialize Memory Agent for conversation context persistence
 const memoryAgent = new MemoryAgent(openai);
+
+/**
+ * Determine conversation phase from intent
+ */
+function determinePhaseFromIntent(intent) {
+  if (!intent) return null;
+  const phaseMap = {
+    'compare_bikes': 'comparing',
+    'bike_recommendation': 'browsing',
+    'model_selection': 'browsing',
+    'more_details': 'browsing',
+    'negotiation': 'negotiating',
+    'price_ask': 'negotiating',
+    'financing_question': 'negotiating',
+    'confirmation': 'closing',
+    'goodbye': 'closing',
+  };
+  return phaseMap[intent] || null;
+}
+
+/**
+ * Get context tags from intent
+ */
+function getTagsFromIntent(intent) {
+  if (!intent) return [];
+  const tagMap = {
+    'bike_recommendation': ['browsing'],
+    'budget_intelligence': ['budget_aware'],
+    'financing_question': ['financing_interested'],
+    'trade_in_question': ['trade_in_pending'],
+    'model_selection': ['model_selected'],
+    'compare_bikes': ['comparing_active'],
+  };
+  return tagMap[intent] || [];
+}
 
 // In-memory cache for non-DB session state (option sets, entities, etc.)
 // This is fine for POC - these are runtime state, not conversation history
@@ -92,6 +128,9 @@ router.post('/api/test-chat', async (req, res) => {
     // Get or create user and conversation
     const user = await getOrCreateUser(phoneNumber);
     const conversation = await getOrCreateConversation(user.id);
+
+    // Get memory context for AI injection
+    const memoryContext = await memoryAgent.getContext(conversation.id, message);
 
     // Get runtime session cache; hydrate optionSets / lastShown from DB when cache is cold (e.g. after restart)
     let cache = sessionCache.get(currentSessionId) || {
@@ -197,6 +236,10 @@ router.post('/api/test-chat', async (req, res) => {
       },
       // Full conversation history from DB - no slice limit
       conversationHistory,
+      // Memory context from DB for AI context injection
+      memoryContext,
+      // AI context summary for prompts
+      aiContextSummary: memoryContext ? buildContextSummary(memoryContext, null) : null,
     };
 
     const result = await workflowEngine.execute(context);
@@ -246,6 +289,46 @@ router.post('/api/test-chat', async (req, res) => {
         processed: true,
       },
     });
+
+    // Store turns in memory for AI context
+    try {
+      // Store user message
+      await memoryAgent.storeTurn(conversation.id, {
+        role: 'user',
+        content: message,
+        intent: result.lastResult?.data?.intent || null,
+        entities: result.lastResult?.data?.entities || null,
+      });
+
+      // Store assistant response
+      await memoryAgent.storeTurn(conversation.id, {
+        role: 'assistant',
+        content: response,
+        intent: result.lastResult?.data?.intent || null,
+      });
+
+      // Update memory snapshot with latest context
+      await memoryAgent.updateMemorySnapshot(conversation.id, {
+        lastIntent: result.lastResult?.data?.intent,
+        lastEntities: result.lastResult?.data?.entities,
+        lastPhase: determinePhaseFromIntent(result.lastResult?.data?.intent),
+        language: cache.language,
+      });
+
+      // Update conversation phase
+      const newPhase = determinePhaseFromIntent(result.lastResult?.data?.intent);
+      if (newPhase) {
+        await memoryAgent.updatePhase(conversation.id, newPhase);
+      }
+
+      // Update context tags based on intent
+      const tagsToAdd = getTagsFromIntent(result.lastResult?.data?.intent);
+      if (tagsToAdd.length > 0) {
+        await memoryAgent.updateTags(conversation.id, tagsToAdd, []);
+      }
+    } catch (memErr) {
+      console.warn('[test-chat] Memory update failed:', memErr.message);
+    }
 
     // Update conversation metadata in DB
     // Use the *last* step that returned products so the ledger matches the most recent list shown
