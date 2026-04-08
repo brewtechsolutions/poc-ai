@@ -97,7 +97,9 @@
             { "name": "brand", "type": "string" },
             { "name": "product_type", "type": "string" },
             { "name": "selected_index", "type": "integer" },
-            { "name": "compare_scope", "type": "string" }
+            { "name": "compare_scope", "type": "string" },
+            { "name": "compare_brand", "type": "string" },
+            { "name": "compare_brands", "type": "string" }
           ],
           "languages": ["english", "malay", "chinese"],
           "fallback_intent": "product_recommendation",
@@ -116,7 +118,8 @@
             "escalation_radar",
             "objection_handler",
             "financing_advisor",
-            "trade_in_specialist"
+            "trade_in_specialist",
+            "brand_comparison_advisor"
           ],
           "skills": [
             {
@@ -130,6 +133,10 @@
             {
               "name": "budget_intelligence",
               "prompt": "## Skill: Budget Intelligence\n- 'more than', 'above', 'at least', 'minimum', 'from', 'starting from' -> set entities.budget_min only. Do NOT set budget or budget_max.\n- 'below', 'under', 'max', 'less than', 'up to', 'not more than' -> set entities.budget_max only. Do NOT set budget or budget_min.\n- 'around', 'about', 'budget X', just a plain number or range like 5k -> set entities.budget only.\n- 'RM5000 to RM8000', 'between 5k and 8k', '5k-8k' -> set both budget_min and budget_max. Do NOT set budget.\n- Extract digits only (no RM symbol, no commas). '10k' -> '10000', 'RM 8,500' -> '8500'.\n- Never guess direction - if unclear, use entities.budget."
+            },
+            {
+              "name": "brand_comparison_advisor",
+              "prompt": "## Skill: Brand Comparison Advisor\n- If the user says 'compare all [brand]' (e.g. 'compare all yamaha', 'bandingkan semua honda', '比较所有雅马哈'), set intent=compare_bikes, entities.compare_scope='brand_all', entities.compare_brand='<brand name only, lowercase>'.\n- If the user says '[brand] vs [brand]' or 'compare [brand] and [brand]' or '[brand] or [brand] which better' (e.g. 'yamaha vs honda', 'compare yamaha and honda', 'honda or yamaha which better', 'yamaha dengan honda'), set intent=compare_bikes, entities.compare_scope='brand_vs_brand', entities.compare_brands='<brand1>,<brand2>' (comma-separated, lowercase).\n- Never hardcode brand names — extract whatever brand the user mentions.\n- Do NOT use brand_all or brand_vs_brand when the user is comparing specific numbered items or specific model names — those are handled by the normal compare flow."
             }
           ],
           "fast_path_rules": [
@@ -158,33 +165,6 @@
               "pattern": "compare|versus|vs\\\\.?|which is better|which one is better|more fuel efficient|most fuel efficient|better mileage|bandingkan",
               "flags": "i",
               "intent": "compare_bikes"
-            }
-          ],
-          "compare_mode_rules": [
-            {
-              "pattern": "\\bcompare\\s+all\\b",
-              "flags": "i",
-              "compare_scope": "all"
-            },
-            {
-              "pattern": "\\bcompare\\s+everything\\b",
-              "flags": "i",
-              "compare_scope": "all"
-            },
-            {
-              "pattern": "\\bcompare\\s+(them\\s+)?all\\b",
-              "flags": "i",
-              "compare_scope": "all"
-            },
-            {
-              "pattern": "bandingkan\\s+semua",
-              "flags": "i",
-              "compare_scope": "all"
-            },
-            {
-              "pattern": "比较全部|比较所有",
-              "flags": "i",
-              "compare_scope": "all"
             }
           ],
           "comparative_follow_up_exclude_rules": [
