@@ -1,4 +1,6 @@
 import openai, { TOKEN_CONFIG } from '../config/openai.js';
+import { resolveSelection } from '../utils/session-option-sets.js';
+import { shouldBypassLanguageGate } from '../utils/comparative-follow-up.js';
 
 /**
  * LanguageAgent
@@ -49,16 +51,27 @@ class LanguageAgent {
     const looksLikeBudgetOrBikeQuery =
       /\brm\s*\d/i.test(msg) ||
       /预算|budget|bajet/i.test(msg) ||
-      /\b(bike|motor|kapcai|scooter|yamaha|honda|modenas|suzuki|kawasaki)\b/i.test(msg);
+      /\b(bike|motor|kapcai|scooter|motosikal|摩托|摩多)\b/i.test(msg);
+
+    const looksLikeLocationRefinement =
+      /我在|我住在|我是在|但是我在/.test(msg) ||
+      /(?:but )?i(?:'m| am) (?:in|at|from)\s+\w/i.test(msg) ||
+      /staying in|based in|located in/i.test(msg) ||
+      /area|kawasan|dekat|near|berhampiran/.test(msg);
     const looksLikeLanguageChoice =
       /^1$|^2$|^3$|^english$|^malay$|^bm$|^bahasa$|^chinese$|^zh$|中文/i.test(msg);
 
-    if (!context.languageLocked && looksLikeBudgetOrBikeQuery && !looksLikeLanguageChoice) {
+    if (
+      !context.languageLocked &&
+      !looksLikeLanguageChoice &&
+      (looksLikeBudgetOrBikeQuery ||
+        looksLikeLocationRefinement ||
+        shouldBypassLanguageGate(raw))
+    ) {
       context.language = context.language || 'english';
-      context.languageLocked = true;
       if (process.env.DEBUG === 'true') {
         console.log(
-          `   [LanguageSelector] Detected content message (budget/bike) without language; defaulting to ${context.language} and continuing`,
+          `   [LanguageSelector] Substantive message (budget/bike/location/workflow rules); defaulting to ${context.language} and continuing (not locking language)`,
         );
       }
       return { data: { language: context.language }, tokensUsed: 0, next: nextIfSet };
@@ -107,6 +120,58 @@ class LanguageAgent {
       if (m && m[1]) return m[1].trim().replace(/\?|\.$/, '').slice(0, 80);
     }
     return t.length <= 80 ? t : t.slice(0, 80);
+  }
+
+  /**
+   * AI-powered model name extraction.
+   * Replaces regex with LLM named entity recognition for better accuracy with typos, variants, and language variations.
+   *
+   * @param {string} userMessage - User message
+   * @param {string} language - Language code
+   * @returns {Promise<object>} { modelsFound, confidence, reasoning }
+   */
+  static async extractModelWithAI(userMessage, language = 'en') {
+    const systemPrompt = `Extract motorcycle model names from the user message.
+
+Known motorcycle brands/models in Malaysia:
+- Honda: CB150R, CB250R, CBR150R, CBR250RR, Wave, Dream, Civic (car), HR-V (car)
+- Yamaha: MT-15, MT-03, YZF-R15, YZF-R3, XSR155, FXZ, Lexi, Aerox, Ego, Ego S, NMAX, NVX
+- Suzuki: GSX-S150, GSX-R150, V-Strom 650, Hayabusa
+- Kawasaki: Ninja 250, Z250, Versys 650, Z900
+- TVS: Apache RTR 160, Apache RR 310
+- Ducati: Panigale V4, Monster 821, Scrambler
+- BMW: G310R, G310GS, S1000RR
+- Modenas: Pulsar NS200, Discover 125
+
+User message: "${userMessage}"
+Language: ${language}
+
+Extract ALL motorcycle model names mentioned. Return null if no motorcycle model found.
+
+Respond with JSON:
+{
+  "modelsFound": ["model1", "model2"], // empty if none
+  "confidence": 0.0-1.0,
+  "reasoning": "brief explanation"
+}`;
+
+    try {
+      const { AI_ROLES, getRoleConfig } = await import('../config/ai-registry.js');
+      const completion = await openai.chat.completions.create({
+        model: getRoleConfig(AI_ROLES.ANALYZER).model || 'gpt-4o',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMessage }
+        ],
+        temperature: 0.1,
+        max_tokens: 100
+      });
+
+      return JSON.parse(completion.choices[0].message.content);
+    } catch (err) {
+      console.warn('[LanguageAgent] AI model extraction failed:', err.message);
+      return { modelsFound: [], confidence: 0, reasoning: err.message };
+    }
   }
 
   /**
@@ -494,7 +559,58 @@ class LanguageAgent {
       }
     }
 
-    // User selected a model by number or by name from lastShownProducts
+    // User selected a model by number or name — prefer option ledger, then lastShownProducts
+    const optionSets = context.optionSets || context.metadata?.optionSets;
+    if (Array.isArray(optionSets) && optionSets.length > 0) {
+      const trimmed = message.trim();
+      const isNumericPick = /^[1-9]\d*\.?$/.test(trimmed);
+      const isNamePick = trimmed.length > 1 && trimmed.length <= 80 && !trimmed.includes('?') && !isNumericPick;
+      if (isNumericPick || isNamePick) {
+        const resolved = resolveSelection({ optionSets }, trimmed);
+        if (resolved) {
+          if (process.env.DEBUG === 'true') {
+            console.log(`   [NLP] Model selection via option ledger: ${resolved.item.stableId}`);
+          }
+          return {
+            data: {
+              intent: 'model_selection',
+              entities: {
+                selected_index: resolved.item.displayIndex,
+                selected_id: resolved.item.stableId,
+                selected_title: resolved.item.title,
+                resolved_from_set: resolved.set.id,
+              },
+              language: context.language || 'english',
+              confidence: 0.95,
+              requires_product_search: false,
+              requires_agent_escalation: false,
+            },
+            tokensUsed: 0,
+            confidence: 0.95,
+          };
+        }
+        if (isNumericPick) {
+          return {
+            data: {
+              intent: 'clarify_selection',
+              entities: {
+                message:
+                  'I have multiple lists — could you clarify which item ' +
+                  trimmed +
+                  ' you mean?',
+              },
+              language: context.language || 'english',
+              confidence: 0.95,
+              requires_product_search: false,
+              requires_agent_escalation: false,
+            },
+            tokensUsed: 0,
+            confidence: 0.95,
+          };
+        }
+      }
+    }
+
     const lastShown = context.lastShownProducts || context.metadata?.lastShownProducts;
     if (lastShown && Array.isArray(lastShown) && lastShown.length > 0) {
       const trimmed = message.trim();
@@ -659,14 +775,21 @@ class LanguageAgent {
         console.log(`   [NLP] Processing message: "${message.substring(0, 50)}..."`);
       }
 
+      // Language agent uses analyzer role config
+      const { AI_ROLES, getRoleConfig } = await import('../config/ai-registry.js');
+      const analyzerConfig = getRoleConfig(AI_ROLES.ANALYZER);
+      const model = node.config.model || analyzerConfig.model;
+      const temperature = node.config.temperature ?? analyzerConfig.temperature;
+      const maxTokens = node.config.max_tokens || analyzerConfig.maxTokens;
+
       const completion = await openai.chat.completions.create({
-        model: node.config.model || 'gpt-4o-mini',
+        model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
-        temperature: node.config.temperature || TOKEN_CONFIG.TEMPERATURE.STRICT,
-        max_tokens: node.config.max_tokens || 150,
+        temperature,
+        max_tokens: maxTokens,
         response_format: { type: 'json_object' },
       });
 
@@ -724,6 +847,7 @@ class LanguageAgent {
     const intent = context.lastResult?.data?.intent;
     const route = node.config.routes.find(r => r.intent === intent);
     const entities = context.lastResult?.data?.entities;
+    const entitiesForTurn = context.lastResult?.data?.entitiesForTurn;
 
     if (process.env.DEBUG === 'true') {
       console.log(
@@ -732,7 +856,12 @@ class LanguageAgent {
     }
 
     return {
-      data: { intent, route, entities: entities || {} },
+      data: {
+        intent,
+        route,
+        entities: entities || {},
+        entitiesForTurn: entitiesForTurn && typeof entitiesForTurn === 'object' ? entitiesForTurn : {},
+      },
       tokensUsed: 0,
       next: route?.next || node.config.fallback,
     };

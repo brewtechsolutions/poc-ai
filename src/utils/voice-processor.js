@@ -1,4 +1,5 @@
 import openai from '../config/openai.js';
+import { AI_ROLES, getRoleConfig } from '../config/ai-registry.js';
 import fs from 'fs';
 import axios from 'axios';
 
@@ -26,10 +27,11 @@ class VoiceProcessor {
         writer.on('error', reject);
       });
 
-      // Transcribe with Whisper
+      // Transcribe with Speech model from registry
+      const speechConfig = getRoleConfig(AI_ROLES.SPEECH);
       const transcription = await openai.audio.transcriptions.create({
         file: fs.createReadStream(tempPath),
-        model: 'whisper-1',
+        model: speechConfig.model,
         language: language || undefined, // Auto-detect if not specified
         response_format: 'json',
       });

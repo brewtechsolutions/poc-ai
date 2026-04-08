@@ -1,4 +1,5 @@
 import openai from '../config/openai.js';
+import { AI_ROLES, getRoleConfig } from '../config/ai-registry.js';
 import axios from 'axios';
 
 /**
@@ -18,9 +19,10 @@ class ImageProcessor {
       const base64Image = Buffer.from(imageResponse.data).toString('base64');
       const mimeType = imageResponse.headers['content-type'] || 'image/jpeg';
 
-      // Analyze with GPT-4 Vision
+      // Analyze with Vision model from registry
+      const visionConfig = getRoleConfig(AI_ROLES.VISION);
       const completion = await openai.chat.completions.create({
-        model: 'gpt-4o',
+        model: visionConfig.model,
         messages: [
           {
             role: 'system',

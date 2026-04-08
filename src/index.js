@@ -13,6 +13,41 @@ app.use(testChatRouter);
 
 const workflowEngine = new WorkflowEngine();
 
+function extractSavedLanguage(user) {
+  const prefs = user?.preferences;
+  if (!prefs || typeof prefs !== 'object') return null;
+  const value = prefs.language;
+  return typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : null;
+}
+
+async function saveUserLanguage(phoneNumber, language) {
+  if (!phoneNumber || !language) return;
+  const existingUser = await prisma.user.findUnique({
+    where: { phoneNumber },
+    select: { id: true, preferences: true },
+  });
+  const existingPreferences =
+    existingUser?.preferences && typeof existingUser.preferences === 'object'
+      ? existingUser.preferences
+      : {};
+  const nextPreferences = { ...existingPreferences, language };
+
+  if (existingUser) {
+    await prisma.user.update({
+      where: { id: existingUser.id },
+      data: { preferences: nextPreferences },
+    });
+    return;
+  }
+
+  await prisma.user.create({
+    data: {
+      phoneNumber,
+      preferences: nextPreferences,
+    },
+  });
+}
+
 // Health check
 app.get('/health', async (req, res) => {
   try {
@@ -27,16 +62,30 @@ app.get('/health', async (req, res) => {
 app.post('/webhook/whatsapp', async (req, res) => {
   try {
     const { message, from, type, mediaUrl } = req.body;
+    const existingUser = from
+      ? await prisma.user.findUnique({
+          where: { phoneNumber: from },
+          select: { preferences: true },
+        })
+      : null;
+    const savedLanguage = extractSavedLanguage(existingUser);
+    const incomingLanguage =
+      typeof req.body.language === 'string' && req.body.language.trim()
+        ? req.body.language.trim().toLowerCase()
+        : null;
+    // Once a language has been selected and saved, keep it fixed.
+    const effectiveLanguage = savedLanguage || incomingLanguage || undefined;
 
     const context = {
       user_message: message,
-      language: req.body.language || undefined,
+      language: effectiveLanguage,
+      languageLocked: !!effectiveLanguage,
       metadata: {
         phone_number: from,
         message_type: type || 'text',
         media_url: mediaUrl,
         timestamp: new Date().toISOString(),
-        language: req.body.language || req.body.metadata?.language,
+        language: effectiveLanguage,
       },
     };
 
@@ -47,12 +96,16 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
     // TODO: Send response via WhatsApp
     // await whatsappClient.sendMessage(from, response);
-    // Persist result.language for this user/session and send as body.language on next request.
+    // Persist locked language per user so subsequent turns stay in the same language.
+    const finalLanguage = result.language || result.lastResult?.data?.language;
+    if (from && finalLanguage) {
+      await saveUserLanguage(from, finalLanguage);
+    }
 
     res.json({
       success: true,
       response,
-      language: result.language || result.lastResult?.data?.language,
+      language: finalLanguage,
       tokensUsed: result.tokensUsed,
       responseTime: result.responseTime,
     });
@@ -66,15 +119,27 @@ app.post('/webhook/whatsapp', async (req, res) => {
 app.post('/api/test', async (req, res) => {
   try {
     const { message, language } = req.body;
+    const testPhone = 'test-user';
+    const existingUser = await prisma.user.findUnique({
+      where: { phoneNumber: testPhone },
+      select: { preferences: true },
+    });
+    const savedLanguage = extractSavedLanguage(existingUser);
+    const incomingLanguage = typeof language === 'string' && language.trim()
+      ? language.trim().toLowerCase()
+      : null;
+    // Keep the conversation language fixed once it's selected.
+    const effectiveLanguage = savedLanguage || incomingLanguage || undefined;
 
     const context = {
       user_message: message,
-      language: language || undefined,
+      language: effectiveLanguage,
+      languageLocked: !!effectiveLanguage,
       metadata: {
-        phone_number: 'test-user',
+        phone_number: testPhone,
         message_type: 'text',
         timestamp: new Date().toISOString(),
-        language: language,
+        language: effectiveLanguage,
       },
     };
 
@@ -83,10 +148,15 @@ app.post('/api/test', async (req, res) => {
                     result.lastResult?.data?.optimized ||
                     'I apologize, I couldn\'t process that request.';
 
+    const finalLanguage = result.language || result.lastResult?.data?.language;
+    if (finalLanguage) {
+      await saveUserLanguage(testPhone, finalLanguage);
+    }
+
     res.json({
       success: true,
       response,
-      language: result.language || result.lastResult?.data?.language,
+      language: finalLanguage,
       debug: {
         intent: result.lastResult?.data?.intent,
         confidence: result.lastResult?.data?.confidence,
