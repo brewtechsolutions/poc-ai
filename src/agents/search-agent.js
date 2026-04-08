@@ -824,6 +824,69 @@ Respond with JSON:
     }
   }
 
+  /**
+   * Search bikes by brand for comparison purposes.
+   * Used when user says "compare all yamaha" or similar.
+   */
+  static async searchBikesByBrand(brand, context = {}) {
+    const { limit = 10 } = context;
+
+    try {
+      const bikes = await prisma.product.findMany({
+        where: {
+          active: true,
+          brand: {
+            mode: 'insensitive',
+            contains: brand
+          }
+        },
+        take: limit,
+        orderBy: { popularity: 'desc' }
+      });
+
+      return bikes;
+    } catch (err) {
+      console.error('[SearchAgent] searchBikesByBrand error:', err.message);
+      return [];
+    }
+  }
+
+  /**
+   * Search bikes by multiple brands for comparison.
+   * Used when user says "compare yamaha vs honda".
+   */
+  static async searchBikesByBrands(brands = [], context = {}) {
+    const { limit = 5 } = context;
+
+    if (!brands || brands.length < 2) return [];
+
+    try {
+      const bikes = await prisma.product.findMany({
+        where: {
+          active: true,
+          OR: brands.map(b => ({
+            brand: { mode: 'insensitive', contains: b }
+          }))
+        },
+        take: limit * brands.length,
+        orderBy: { popularity: 'desc' }
+      });
+
+      // Group by brand
+      const grouped = {};
+      brands.forEach(b => grouped[b.toLowerCase()] = []);
+      bikes.forEach(bike => {
+        const key = Object.keys(grouped).find(k => bike.brand?.toLowerCase().includes(k));
+        if (key) grouped[key].push(bike);
+      });
+
+      return grouped;
+    } catch (err) {
+      console.error('[SearchAgent] searchBikesByBrands error:', err.message);
+      return {};
+    }
+  }
+
 }
 
 export default SearchAgent;
