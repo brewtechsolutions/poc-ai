@@ -445,73 +445,39 @@ class AnalysisAgent {
    * @param {object} config - Workflow config
    * @returns {Promise<object|null>} Result with intent/entities or null if confidence too low
    */
+  /**
+   * AI fast-path: only handles truly simple, stateless intents that need zero context.
+   * Complex intents with entity extraction go to LLM analyze which has full conversation context.
+   */
   static async handleAIFastPath(userMessage, context = {}, config = {}) {
     const { useAIFastPath } = config;
     if (useAIFastPath === false) return null;
 
-    try {
-      const roleConfig = getRoleConfig(AI_ROLES.ANALYZER);
+    // Only handle these simple patterns with fast-path - everything else needs LLM
+    const simplePatterns = {
+      GREETING: /^(hi|hello|hey|good\s*(morning|afternoon|evening)|ola|halo|hai|apa|khabar)/i,
+      THANKS: /^(thank|thanks|terima\s*kasih|makasih|mersi|xie\s*xie)/i,
+      GOODBYE: /^(bye|goodbye|see\s*you|take\s*care|jumpa|selamat\s*(tinggal|hari))/i,
+      CONFIRMATION: /^(yes|yeah|yup|correct|right|ok|okay|yalah|okayy)/i,
+      NEGATION: /^(no|nope|not|never|tidak| tak|bukan)/i,
+      REPEAT: /^(repeat|lagi|sekali\s*lagi|show\s*me\s*again|what\s*was)/i,
+    };
 
-      const contextPrompt = context
-        ? `\nCurrent conversation phase: ${context.conversationPhase || context.phase || 'initial'}
-Pending questions: ${(context.pendingQuestions || []).map(q => q.question).join('; ') || 'none'}
-Last entities: ${JSON.stringify(context.lastEntities || context.entities || {})}`
-        : '';
+    const trimmed = userMessage.trim();
 
-      const systemPrompt = `You are a fast-path classifier for a motorcycle sales chatbot.
-Determine if this message matches a known fast-path pattern.
-
-Fast-path patterns:
-1. GREETING - hello, hi, hey, good morning/afternoon/evening
-2. THANKS - thank you, thanks, appreciate
-3. GOODBYE - bye, goodbye, see you, take care
-4. CONFIRMATION - yes, yeah, yup, correct, right, ok, okay
-5. NEGATION - no, nope, not, never
-6. REPEAT - show me again, what was, repeat, lagi, sekali lagi
-7. COMPARE_REQUEST - compare, bandingkan, versus, vs, between
-8. BUDGET_STATEMENT - budget is, within, around, kurang dari, lebih dari, rm5000, rm10k
-9. BRAND_INTEREST - like honda, prefer toyota (but motorcycle brands),感兴趣的
-10. MODEL_REQUEST - what is, tell me about, details, specs
-11. AVAILABILITY - ada, available, in stock, tersedia
-12. PRICE_ASK - harga, price, cost, berapa ringgit
-13. TEST_RIDE - test ride, try, проба
-14. FINANCING - loan, financing, installment, ansuran,耐性
-15. TRADE_IN - trade in, tukar, exchange, barter
-16. LOCATION - where, location, address, tempat, located
-17. CHITCHAT - not motorcycle related
-18. MODEL_SELECTION - when user selects from numbered list by number or name
-
-${contextPrompt}
-
-User message: "${userMessage}"
-Language hint: ${context.language || 'english'}
-
-Respond with JSON only:
-{
-  "pattern": "PATTERN_NAME or null",
-  "confidence": 0.0-1.0,
-  "extractedEntities": {},
-  "reasoning": "brief explanation"
-}
-
-If confidence < 0.75, respond with pattern: null.`;
-
-      const completion = await openai.chat.completions.create({
-        model: roleConfig.model || 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userMessage }
-        ],
-        temperature: 0.3,
-        max_tokens: 200
-      });
-
-      const result = JSON.parse(completion.choices[0].message.content);
-      return result;
-    } catch (err) {
-      if (DEBUG) console.warn('[AnalysisAgent] AI fast-path failed, falling back to rules:', err.message);
-      return null;
+    for (const [pattern, regex] of Object.entries(simplePatterns)) {
+      if (regex.test(trimmed)) {
+        return {
+          pattern,
+          confidence: 0.95,
+          extractedEntities: {},
+          reasoning: `Simple ${pattern} pattern matched`,
+        };
+      }
     }
+
+    // For everything else, let LLM handle it with full context
+    return null;
   }
 
   static _makeFastResult(intent, entities, context, config = {}) {
@@ -637,14 +603,17 @@ Conversation language: ${lang}. Last intent: ${context.lastIntent || 'none'}. Ex
       const roleConfig = getRoleConfig(AI_ROLES.ANALYZER);
       const model = options.model || config.model || roleConfig.model;
       const temperature = options.temperature ?? config.temperature ?? roleConfig.temperature;
-      const maxTokens = options.max_tokens || config.max_tokens || roleConfig.maxTokens;
+      // Use higher token limit to ensure full JSON response (was 250, too low)
+      const maxTokens = 2000;
 
       // Primary path: tool-call structured output
+      const isO3Model = model.startsWith('o3');
       const toolCompletion = await openai.chat.completions.create({
         model,
         messages,
-        temperature,
-        max_tokens: maxTokens,
+        ...(isO3Model
+          ? { max_completion_tokens: maxTokens }
+          : { temperature, max_tokens: maxTokens }),
         tools: this.getToolDefinition(config),
         tool_choice: { type: 'function', function: { name: 'classify_message' } },
       });
@@ -655,22 +624,31 @@ Conversation language: ${lang}. Last intent: ${context.lastIntent || 'none'}. Ex
       if (toolCall?.function?.name === 'classify_message' && typeof args === 'string' && args.trim()) {
         const raw = JSON.parse(args);
         const plan = this.normalizePlanFromModel(raw, context, tokensUsed, 'llm', config);
-        if (DEBUG) console.log('[AnalysisAgent] Tool intent:', plan.intent);
+        if (DEBUG) console.log('[AnalysisAgent] Tool intent:', plan.intent, '| entities:', JSON.stringify(plan.entities));
         return plan;
       }
 
       // Safety net: force json_object response_format if tool-call output is missing/malformed
+      // OpenAI requires "json" word in messages when using json_object format
+      const jsonMessages = [
+        {
+          role: 'system',
+          content: `${systemPrompt}\n\nRespond with a JSON object containing: intent, entities, language, confidence, suggestedQuestion, missingInfo, hasAskedBudget, hasAskedArea, hasAskedModel, salesInsight, skipAlreadyShownIds.`,
+        },
+        ...messages.slice(1),
+      ];
       const jsonCompletion = await openai.chat.completions.create({
         model,
-        messages,
-        temperature,
-        max_tokens: maxTokens,
+        messages: jsonMessages,
+        ...(isO3Model
+          ? { max_completion_tokens: maxTokens }
+          : { temperature, max_tokens: maxTokens }),
         response_format: { type: 'json_object' },
       });
       const jsonTokensUsed = jsonCompletion.usage?.total_tokens || 0;
       const content = JSON.parse(jsonCompletion.choices[0].message.content || '{}');
       const plan = this.normalizePlanFromModel(content, context, jsonTokensUsed, 'llm', config);
-      if (DEBUG) console.log('[AnalysisAgent] JSON intent:', plan.intent);
+      if (DEBUG) console.log('[AnalysisAgent] JSON intent:', plan.intent, '| entities:', JSON.stringify(plan.entities));
       return plan;
     } catch (err) {
       console.error('[AnalysisAgent] LLM error:', err.message);

@@ -104,7 +104,6 @@ export class MemoryAgent {
           pendingQuestions: true,
           contextTags: true,
           lastEntitiesRaw: true,
-          language: true,
           lastShownProducts: true
         }
       });
@@ -118,7 +117,6 @@ export class MemoryAgent {
         pendingQuestions: conversation.pendingQuestions || [],
         tags: conversation.contextTags || [],
         lastEntities: conversation.lastEntitiesRaw || {},
-        language: conversation.language,
         lastShownProducts: conversation.lastShownProducts || []
       };
     } catch (err) {
@@ -148,9 +146,15 @@ export class MemoryAgent {
       const current = conversation.memorySnapshot || {};
       const updated = { ...current, ...updates, lastUpdated: new Date().toISOString() };
 
+      // Build update data - lastEntitiesRaw is a top-level field, memorySnapshot is JSON
+      const updateData = { memorySnapshot: updated };
+      if (updates.lastEntities !== undefined) {
+        updateData.lastEntitiesRaw = updates.lastEntities;
+      }
+
       await prisma.conversation.update({
         where: { id: conversationId },
-        data: { memorySnapshot: updated }
+        data: updateData
       });
     } catch (err) {
       console.warn('[MemoryAgent] updateMemorySnapshot failed:', err.message);

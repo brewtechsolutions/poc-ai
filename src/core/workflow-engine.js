@@ -1264,6 +1264,22 @@ Stay concise.`;
     if (plan.salesInsight != null) context.salesInsight = plan.salesInsight;
     if (plan.suggestedQuestion != null) context.suggestedQuestion = plan.suggestedQuestion;
     if (plan.missingInfo?.length > 0) context.missingInfo = plan.missingInfo;
+
+    // Preserve analysis result in a dedicated field so it survives overwritten lastResult
+    context.analysisResult = {
+      intent: plan.intent,
+      entities: plan.entities || {},
+      language: plan.language,
+      confidence: plan.confidence,
+      source: plan.source,
+      suggestedQuestion: plan.suggestedQuestion,
+      missingInfo: plan.missingInfo || [],
+      hasAskedBudget: plan.hasAskedBudget,
+      hasAskedArea: plan.hasAskedArea,
+      hasAskedModel: plan.hasAskedModel,
+      salesInsight: plan.salesInsight,
+    };
+
     return {
       data: {
         intent: plan.intent,

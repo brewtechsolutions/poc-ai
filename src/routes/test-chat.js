@@ -167,16 +167,6 @@ router.post('/api/test-chat', async (req, res) => {
 
     cache.turnCount = (cache.turnCount ?? 0) + 1;
 
-    // Save user message to DB
-    await prisma.message.create({
-      data: {
-        conversationId: conversation.id,
-        type: 'text',
-        content: message,
-        isFromUser: true,
-      },
-    });
-
     // Build full conversation history from DB messages
     const allMessages = conversation.messages || [];
     const conversationHistory = allMessages
@@ -240,9 +230,28 @@ router.post('/api/test-chat', async (req, res) => {
       memoryContext,
       // AI context summary for prompts
       aiContextSummary: memoryContext ? buildContextSummary(memoryContext, null) : null,
+      // Spread memory context fields to top-level so AI fast-path can read them
+      // Also merge memory entities into context.entities so LLM prompt sees them
+      ...(memoryContext ? {
+        conversationPhase: memoryContext.phase,
+        pendingQuestions: memoryContext.pendingQuestions,
+        lastEntities: memoryContext.lastEntities,
+        contextTags: memoryContext.tags,
+        // Merge memory entities with session cache entities (memory takes precedence for continuity)
+        entities: { ...(cache.lastEntities || {}), ...(memoryContext.lastEntities || {}) },
+      } : {}),
     };
 
     const result = await workflowEngine.execute(context);
+
+    // --- TEMP DEBUG ---
+    console.log('[entities-debug] result.analysisResult:', JSON.stringify(result.analysisResult, null, 2));
+    console.log('[entities-debug] result.lastResult?.data:', JSON.stringify(result.lastResult?.data, null, 2));
+    console.log('[entities-debug] result.analysisEntities:', JSON.stringify(result.analysisEntities, null, 2));
+    console.log('[entities-debug] allResults entities:',
+      result.allResults?.map(r => ({ step: r.step, entities: r.data?.entities }))
+    );
+    // --- END DEBUG ---
 
     if (Array.isArray(result.optionSets) && result.optionSets.length > 0) {
       cache.optionSets = result.optionSets;
@@ -277,6 +286,22 @@ router.post('/api/test-chat', async (req, res) => {
         : "I apologize, I couldn't process that request. Please try rephrasing.";
     }
 
+    // Use analysisResult if available (preserved from analysis_agent), otherwise fall back to lastResult
+    const analysisData = result.analysisResult || result.lastResult?.data;
+
+    // Save user message to DB AFTER workflow - now has intent/entities
+    await prisma.message.create({
+      data: {
+        conversationId: conversation.id,
+        type: 'text',
+        content: message,
+        isFromUser: true,
+        intent: analysisData?.intent || null,
+        entities: analysisData?.entities || undefined,
+        processed: true,
+      },
+    });
+
     // Save bot response to DB
     await prisma.message.create({
       data: {
@@ -284,45 +309,45 @@ router.post('/api/test-chat', async (req, res) => {
         type: 'text',
         content: response,
         isFromUser: false,
-        intent: result.lastResult?.data?.intent || null,
-        entities: result.lastResult?.data?.entities || undefined,
+        intent: analysisData?.intent || null,
+        entities: analysisData?.entities || undefined,
         processed: true,
       },
     });
 
     // Store turns in memory for AI context
     try {
-      // Store user message
+      // Store user message with preserved analysis intent/entities
       await memoryAgent.storeTurn(conversation.id, {
         role: 'user',
         content: message,
-        intent: result.lastResult?.data?.intent || null,
-        entities: result.lastResult?.data?.entities || null,
+        intent: analysisData?.intent || null,
+        entities: analysisData?.entities || null,
       });
 
       // Store assistant response
       await memoryAgent.storeTurn(conversation.id, {
         role: 'assistant',
         content: response,
-        intent: result.lastResult?.data?.intent || null,
+        intent: analysisData?.intent || null,
       });
 
       // Update memory snapshot with latest context
       await memoryAgent.updateMemorySnapshot(conversation.id, {
-        lastIntent: result.lastResult?.data?.intent,
-        lastEntities: result.lastResult?.data?.entities,
-        lastPhase: determinePhaseFromIntent(result.lastResult?.data?.intent),
+        lastIntent: analysisData?.intent,
+        lastEntities: analysisData?.entities,
+        lastPhase: determinePhaseFromIntent(analysisData?.intent),
         language: cache.language,
       });
 
       // Update conversation phase
-      const newPhase = determinePhaseFromIntent(result.lastResult?.data?.intent);
+      const newPhase = determinePhaseFromIntent(analysisData?.intent);
       if (newPhase) {
         await memoryAgent.updatePhase(conversation.id, newPhase);
       }
 
       // Update context tags based on intent
-      const tagsToAdd = getTagsFromIntent(result.lastResult?.data?.intent);
+      const tagsToAdd = getTagsFromIntent(analysisData?.intent);
       if (tagsToAdd.length > 0) {
         await memoryAgent.updateTags(conversation.id, tagsToAdd, []);
       }

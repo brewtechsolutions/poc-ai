@@ -62,7 +62,7 @@
         "type": "analysis_agent",
         "name": "Analysis Agent",
         "config": {
-          "model": "gpt-4o",
+          "model": "o3-mini",
           "system_prompt": "You are a WhatsApp sales assistant for a Malaysian motorcycle shop.\n\nScope rules (VERY IMPORTANT):\n- You ONLY sell motorcycles and related services.\n- If the user mentions a clearly non-motorcycle brand (e.g. Samsung, Apple, Sony, LG, Dell, Huawei, Xiaomi, Oppo, Vivo, HP, Lenovo, Asus, Nike, Adidas), set intent to out_of_scope immediately.\n- If the user mentions a clearly non-motorcycle product type (e.g. phone, tablet, laptop, PC, computer, TV, fridge, washing machine, shoes, clothes, car, house, property), set intent to out_of_scope immediately.\n- If the message is just a model name that could be a motorcycle (e.g. Y15ZR, RS150R, LC135), treat as product_inquiry.\n- Only set intent to out_of_scope when the user is clearly asking for something outside motorcycles.\n- When in doubt between out_of_scope and product_inquiry, prefer product_inquiry ONLY if the name could plausibly be a motorcycle model.\n\nTest ride intent rules (VERY IMPORTANT):\n- test_ride_request: use this when the user wants to arrange or book a test ride but has NOT confirmed they are ready yet. Phrases that map to this intent: \"预约\", \"试驾\", \"预约试驾\", \"test ride\", \"arrange test ride\", \"book test ride\", \"ujian memandu\", \"nak test ride\", \"want to test ride\". ALWAYS use test_ride_request first — never skip to test_ride_booking on the first mention of a test ride.\n- test_ride_booking: ONLY use this when the user explicitly confirms they are ready to proceed AFTER already seeing the deposit information. Phrases that map to this intent: \"i am ready\", \"i'm ready\", \"im ready\", \"ready\", \"sedia\", \"dah ready\", \"准备好了\", \"好了\", \"我准备好了\". Do NOT classify \"预约\" or \"试驾\" alone as test_ride_booking.\n\nUse the skills below to classify the message and extract entities for routing. Always call the tool classify_message and fill its schema accurately.",
           "intents": [
             "greeting",
@@ -275,7 +275,7 @@
         "config": {
           "search_node_id": "bike_search",
           "recommendation_intents": ["product_recommendation", "bike_recommendation"],
-          "area_question_intents": ["area_question"],
+          "area_question_intents": ["area_question", "LOCATION"],
           "routes": [
             { "intent": "greeting", "next": "greeting_handler" },
             { "intent": "inquire_about_motorcycle", "next": "bike_search" },
@@ -289,7 +289,9 @@
             { "intent": "compare_bikes", "next": "compare_bikes_handler" },
             { "intent": "price_inquiry", "next": "price_lookup" },
             { "intent": "budget_question", "next": "budget_handler" },
+            { "intent": "BUDGET_STATEMENT", "next": "budget_handler" },
             { "intent": "area_question", "next": "area_handler" },
+            { "intent": "LOCATION", "next": "area_handler" },
             { "intent": "model_question", "next": "model_handler" },
             { "intent": "specification_question", "next": "specification_lookup" },
             { "intent": "test_ride_request", "next": "test_ride_info_handler" },
@@ -314,7 +316,7 @@
         "config": {
           "model": "gpt-4o-mini",
           "temperature": 0.2,
-          "max_tokens": 200,
+          "max_tokens": 2000,
           "system_prompt": "You are a motorcycle sales assistant. Detect the language (Malay, Chinese, English) and extract intent from the user message. If the user replies with only budget, area/location and maybe model (e.g. \"RM 5,000, AreaName, Preferred Model\"), classify as bike_recommendation and fill entities. If the user asks for other options, more bikes, alternatives, or \"got others?\" / \"any others?\" / \"show more\", classify as more_options. If the user asks for more detail, full specs, or \"tell me more\" about a product, classify as more_details. If the user selects a model by number (1, 2, 3) or by name, classify as model_selection. Return JSON with: language (malay/chinese/english), intent, entities, confidence (0-1), requires_budget_info, requires_area_info, requires_model_info.",
           "extract": {
             "intents": [
@@ -466,7 +468,7 @@
         "config": {
           "model": "gpt-4o-mini",
           "temperature": 0.3,
-          "max_tokens": 300,
+          "max_tokens": 2000,
           "system_prompt": "Analyze the user's product inquiry. Determine what information is missing: budget, area/location, preferred model/brand, product type, specifications, new/used preference. Return JSON with: missing_info (array), has_budget (boolean), has_area (boolean), has_model (boolean), should_ask_budget (boolean), should_ask_area (boolean), should_ask_model (boolean), reasoning.",
           "next_complete": "bike_search",
           "next_missing_info": "smart_question_generator",
@@ -480,7 +482,7 @@
         "config": {
           "model": "gpt-4o-mini",
           "temperature": 0.4,
-          "max_tokens": 200,
+          "max_tokens": 2000,
           "system_prompt": "You are a sales assistant. Based on the conversation context and what is still missing (especially budget in RM, area/location, and preferred model/brand), generate ONE natural, friendly follow-up question in the user's language (Malay/Chinese/English) that clearly asks for the missing product information. Sound like a real Malaysian salesperson chatting on WhatsApp: short sentences, simple words, and warm tone. You can use light particles like 'lah', 'ya', 'meh' when natural in Malay or English, but do not use them in Chinese. Avoid sounding robotic or too formal. Return JSON with: question (string), question_type (budget/area/model/other), language (same as user).",
           "next": "question_formatter"
         }
@@ -522,9 +524,9 @@
         "type": "ml",
         "name": "Sales Analysis Agent",
         "config": {
-          "model": "gpt-4o-mini",
+          "model": "o3-mini",
           "temperature": 0.2,
-          "max_tokens": 400,
+          "max_tokens": 2000,
           "system_prompt": "You are a sales analysis agent. Based on the conversation context and the list of candidate products, analyze the user's message (budget, area/location, preferred model/brand, product type, specifications, new/used) and decide which products are the best fit. Consider: budget match, area availability, model preference, specifications, user intent, and popularity. Provide clear sales-focused reasoning. Return JSON with: products (array with id, relevance_score, reasoning), overall_reasoning, confidence.\n\nBudget matching rules (read entities carefully):\n- entities.budget_min is set -> user wants price >= budget_min. Exclude bikes below budget_min. Rank higher-priced bikes as stronger matches.\n- entities.budget_max is set -> user wants price <= budget_max. Exclude bikes above budget_max.\n- entities.budget_min AND budget_max are both set -> user wants price within that range. Exclude bikes outside it.\n- entities.budget is set (no min/max) -> treat as a flexible target. Allow +/-20% variance.\n- If no budget entity is set -> rank by popularity and relevance only.",
           "product_type_label": "motorcycle",
           "ranking_factors": [
@@ -684,7 +686,7 @@
         "config": {
           "model": "gpt-4o-mini",
           "temperature": 0.3,
-          "max_tokens": 150,
+          "max_tokens": 2000,
           "system_prompt": "You are a sales assistant. The user's message was unclear or we need one more detail. Based on the conversation context, last intent, and what is missing (budget, area/location, model/brand, or something else), generate ONE short, friendly clarification question in the user's language (Malay/Chinese/English). Be specific when possible (e.g. 'Just to confirm, is your budget in RM?' or 'You said Puchong – did you mean our Puchong branch?'). IMPORTANT: Do NOT wrap user-provided values (budget, area/location, model/brand) in parentheses. Never output '(' or ')' around those values. Example: write 'your budget RM5000' not 'your budget (RM5000)'. Return JSON with: clarification_message (string), language (malay/chinese/english).",
           "next": "clarification_formatter"
         }
@@ -707,7 +709,7 @@
         "config": {
           "model": "gpt-4o-mini",
           "temperature": 0.3,
-          "max_tokens": 250,
+          "max_tokens": 2000,
           "system_prompt": "You are a motorcycle sales assistant. The user's search returned no results.\n\nIMPORTANT: If the user was asking about a non-motorcycle product (phone, tablet, laptop, electronics, etc.), do NOT suggest motorcycles as alternatives. Instead, politely explain we only sell motorcycles and invite them to ask about bikes.\n\nIMPORTANT: Do NOT wrap user-provided values (budget, area/location, model/brand) in parentheses. Never output '(' or ')' around those values. Example: write 'budget RM5000' not 'budget (RM5000)'.\n\nIf the user WAS asking about a motorcycle that we don't have:\n1. Briefly explain why there were no results (wrong budget/area, model not in stock).\n2. Suggest 2-3 concrete next steps (try different budget/area, ask for similar models).\n3. Offer to connect them with the team.\n\nReturn JSON with: message (string), was_out_of_scope (boolean).",
           "next": "no_results_formatter"
         }
@@ -820,7 +822,7 @@
         "name": "Image Processor",
         "config": {
           "model": "gpt-4o",
-          "max_tokens": 300,
+          "max_tokens": 2000,
           "system_prompt": "Analyze motorcycle image. Identify: brand, model, approximate year, condition, modifications, price estimate. Extract any visible text. Return structured JSON.",
           "extract_text": true,
           "identify_motorcycle": true,
@@ -873,7 +875,7 @@
         "config": {
           "model": "gpt-4o-mini",
           "temperature": 0.55,
-          "max_tokens": 600,
+          "max_tokens": 2000,
           "optimize_for": "whatsapp",
           "remove_redundancy": true,
           "compress_while_clear": true,
