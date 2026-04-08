@@ -10,24 +10,108 @@
 
 ---
 
+## ⚠️ Known Bug — Must Fix First (Task 0)
+
+"compare all yamaha" currently returns ALL brands because two things intercept it before the new brand logic runs:
+
+**Bug 1 — FastPath in `analysis-agent.js` (line ~283)**
+The `compare_mode_rules` loop runs **before the LLM**. "compare all yamaha" matches `\bcompare\s+all\b` (no end-anchor) → fastPath short-circuits with `compare_scope: 'all'`. The LLM and `brand_comparison_advisor` skill **never run**, so `compare_brand` is never extracted.
+
+**Bug 2 — `messageMatchesCompareMode()` in `workflow-engine.js` (line ~559)**
+Even if the LLM did set `compare_scope: brand_all`, the `wantsCompareAll` guard calls `this.messageMatchesCompareMode(message, 'all')` which tests the raw message against the same unanchored regex — still matches "compare all yamaha" — and falls into the full-list comparison.
+
+**Fix for both:** Anchor all "compare all" patterns with `\s*$` so "compare all yamaha" no longer matches (Task 0). Also move the `brand_all` block **before** `wantsCompareAll` in `handleCompareBikes()` as a belt-and-suspenders guard (Task 2).
+
+---
+
 ## Files Changed
 
 | File | Change |
 |------|--------|
-| `workflow.json` | Add `compare_brand` + `compare_brands` entities; add `brand_comparison_advisor` skill; add it to `active_skills` |
-| `src/core/workflow-engine.js` | Add `brand_all` and `brand_vs_brand` handling blocks in `handleCompareBikes()`; add DB fallback after `resolveRef()` misses |
+| `workflow.json` | **[Task 0]** Anchor compare_mode_rules regexes; **[Task 1]** add entities + `brand_comparison_advisor` skill |
+| `src/core/workflow-engine.js` | **[Task 2]** brand_all block BEFORE wantsCompareAll; brand_vs_brand block; DB fallback on miss |
 
 ---
 
 ## Current Behaviour Reference
 
-- `handleCompareBikes()` is at line ~404 in `src/core/workflow-engine.js`
+- `handleCompareBikes()` starts at line ~404 in `src/core/workflow-engine.js`
 - `wantsCompareAll` check is at line ~558–562
 - `resolveRef()` is defined locally inside `handleCompareBikes()` at line ~582
 - `item1`/`item2` not-found return is at line ~649–660
-- `parseCompareRefs()` is at line ~871
-- `resolveTwoProductsFromDb()` is at line ~368 (already handles DB brand lookup — we reuse it)
-- `analysis_agent` config is in `workflow.json` starting at line ~62
+- `resolveTwoProductsFromDb()` is at line ~368 (reused for DB fallback)
+- `compare_mode_rules` fastPath loop is in `analysis-agent.js` at line ~283
+- `analysis_agent` config in `workflow.json` starts at line ~62
+
+---
+
+## Task 0: Anchor `compare_mode_rules` patterns so "compare all yamaha" falls through to LLM
+
+This is the root-cause fix. Without it, Tasks 1–3 have no effect.
+
+**Files:**
+- Modify: `workflow.json` (the `compare_mode_rules` array, ~line 163)
+
+- [ ] **Step 1: Add `\s*$` end-anchor to every "compare all" pattern**
+
+Find the `compare_mode_rules` array in `workflow.json`. It currently looks like this:
+
+```json
+"compare_mode_rules": [
+  { "pattern": "\\bcompare\\s+all\\b", "flags": "i", "compare_scope": "all" },
+  { "pattern": "\\bcompare\\s+everything\\b", "flags": "i", "compare_scope": "all" },
+  { "pattern": "\\bcompare\\s+(them\\s+)?all\\b", "flags": "i", "compare_scope": "all" },
+  { "pattern": "bandingkan\\s+semua", "flags": "i", "compare_scope": "all" },
+  { "pattern": "比较全部|比较所有", "flags": "i", "compare_scope": "all" }
+],
+```
+
+Replace it with (note `\\s*$` appended to every pattern):
+
+```json
+"compare_mode_rules": [
+  { "pattern": "\\bcompare\\s+all\\b\\s*$", "flags": "i", "compare_scope": "all" },
+  { "pattern": "\\bcompare\\s+everything\\b\\s*$", "flags": "i", "compare_scope": "all" },
+  { "pattern": "\\bcompare\\s+(them\\s+)?all\\b\\s*$", "flags": "i", "compare_scope": "all" },
+  { "pattern": "bandingkan\\s+semua\\s*$", "flags": "i", "compare_scope": "all" },
+  { "pattern": "比较全部$|比较所有$", "flags": "i", "compare_scope": "all" }
+],
+```
+
+**Why this works:** "compare all" (nothing after) → still matches → full-list compare. "compare all yamaha" → no match → falls through to LLM → LLM applies `brand_comparison_advisor` skill → extracts `compare_scope: brand_all` + `compare_brand: yamaha`.
+
+- [ ] **Step 2: Verify JSON is still valid**
+
+```bash
+node -e "JSON.parse(require('fs').readFileSync('workflow.json','utf8')); console.log('valid')"
+```
+
+Expected output: `valid`
+
+- [ ] **Step 3: Quick sanity test of the regex in Node**
+
+```bash
+node -e "
+const re1 = /\\bcompare\\s+all\\b\\s*$/i;
+console.log('compare all        :', re1.test('compare all'));        // true
+console.log('compare all yamaha :', re1.test('compare all yamaha')); // false  ← was wrong before
+console.log('compare all please :', re1.test('compare all please')); // false
+"
+```
+
+Expected:
+```
+compare all        : true
+compare all yamaha : false
+compare all please : false
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add workflow.json
+git commit -m "fix: anchor compare_mode_rules regexes so brand-scoped compare falls through to LLM"
+```
 
 ---
 
@@ -39,11 +123,6 @@
 - [ ] **Step 1: Add `compare_brand` and `compare_brands` to the entities array**
 
 In `workflow.json`, find the `entities` array inside the `analysis_agent` config node (currently ends with `{ "name": "compare_scope", "type": "string" }`). Add two entries after it:
-
-```json
-{ "name": "compare_brand", "type": "string" },
-{ "name": "compare_brands", "type": "string" }
-```
 
 The entities array should end like this after the edit:
 
@@ -66,7 +145,7 @@ In `workflow.json`, inside the `analysis_agent` config, find the `"skills"` arra
 
 - [ ] **Step 3: Add `brand_comparison_advisor` to `active_skills`**
 
-In `workflow.json`, find the `"active_skills"` array inside the `analysis_agent` config. It currently ends with `"trade_in_specialist"`. Add `"brand_comparison_advisor"` at the end:
+In `workflow.json`, find the `"active_skills"` array inside the `analysis_agent` config. Add `"brand_comparison_advisor"` at the end:
 
 ```json
 "active_skills": [
@@ -100,14 +179,16 @@ git commit -m "feat: add brand_comparison_advisor skill and compare_brand/compar
 
 ---
 
-## Task 2: Handle `brand_all` scope in `handleCompareBikes()`
+## Task 2: Add `brand_all` and `brand_vs_brand` handlers in `handleCompareBikes()`
+
+The `brand_all` block must go **before** `wantsCompareAll` — if it were after, any message that slipped past Task 0 would still be caught by the "all" scope check first.
 
 **Files:**
-- Modify: `src/core/workflow-engine.js` (inside `handleCompareBikes()`, after line ~562)
+- Modify: `src/core/workflow-engine.js` (inside `handleCompareBikes()`)
 
-- [ ] **Step 1: Insert the `brand_all` handler block after the `wantsCompareAll` block**
+- [ ] **Step 1: Insert the `brand_all` and `brand_vs_brand` blocks BEFORE `wantsCompareAll`**
 
-In `src/core/workflow-engine.js`, find this block (around line 558–562):
+Find this block in `handleCompareBikes()` (around line 558):
 
 ```js
     const wantsCompareAll =
@@ -117,10 +198,12 @@ In `src/core/workflow-engine.js`, find this block (around line 558–562):
     }
 ```
 
-Add the following block **immediately after** it (before the `matchesComparativeFollowUp` line):
+Replace it with:
 
 ```js
-    // Brand-scoped compare-all: "compare all yamaha" → filter list by brand, fall back to DB
+    // Brand-scoped compare-all: "compare all yamaha" → filter list by brand, fall back to DB.
+    // IMPORTANT: this block must come before wantsCompareAll — the "all" regex is unanchored
+    // in messageMatchesCompareMode and would otherwise swallow "compare all yamaha".
     const compareBrand = (entities.compare_brand || '').trim().toLowerCase();
     if (entities.compare_scope === 'brand_all' && compareBrand) {
       let brandItems = (latestSet?.items || []).filter(it => {
@@ -150,7 +233,6 @@ Add the following block **immediately after** it (before the `matchesComparative
       if (brandItems.length >= 2) {
         return await this.runBikeComparisonMany(brandItems, language, node);
       }
-      // Not enough results for that brand
       const brandNotFoundMsg = `Sorry, I couldn't find enough ${compareBrand} models to compare.`;
       return {
         data: { finalResponse: brandNotFoundMsg, formatted: brandNotFoundMsg, response: brandNotFoundMsg, pendingCompare: null },
@@ -158,32 +240,8 @@ Add the following block **immediately after** it (before the `matchesComparative
         next: node.config?.next || 'response_sender',
       };
     }
-```
 
-- [ ] **Step 2: Manually test with a Node REPL or by running the dev server**
-
-Send the message `"compare all yamaha"` in the chat. Expected: A comparison table of Yamaha models from the DB or list.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/core/workflow-engine.js
-git commit -m "feat: handle compare_scope=brand_all in handleCompareBikes"
-```
-
----
-
-## Task 3: Handle `brand_vs_brand` scope in `handleCompareBikes()`
-
-**Files:**
-- Modify: `src/core/workflow-engine.js` (immediately after the `brand_all` block added in Task 2)
-
-- [ ] **Step 1: Insert the `brand_vs_brand` handler block**
-
-Directly after the closing `}` of the `brand_all` block you added in Task 2, add:
-
-```js
-    // Brand-vs-brand compare: "yamaha vs honda" → fetch top product per brand from DB
+    // Brand-vs-brand compare: "yamaha vs honda" → fetch top product per brand from DB.
     const compareBrandsStr = (entities.compare_brands || '').trim();
     if (entities.compare_scope === 'brand_vs_brand' && compareBrandsStr) {
       const brands = compareBrandsStr.split(',').map(b => b.trim().toLowerCase()).filter(Boolean);
@@ -210,10 +268,7 @@ Directly after the closing `}` of the `brand_all` block you added in Task 2, add
         if (brandItems.length >= 2) {
           return await this.runBikeComparisonMany(brandItems, language, node);
         }
-        const missingBrands = brands.filter(
-          (b, i) => !brandItems[i]
-        );
-        const bvsNotFoundMsg = `Sorry, I couldn't find products for: ${missingBrands.join(', ')}.`;
+        const bvsNotFoundMsg = `Sorry, I couldn't find products for one or more of these brands: ${brands.join(', ')}.`;
         return {
           data: { finalResponse: bvsNotFoundMsg, formatted: bvsNotFoundMsg, response: bvsNotFoundMsg, pendingCompare: null },
           tokensUsed: 0,
@@ -221,33 +276,43 @@ Directly after the closing `}` of the `brand_all` block you added in Task 2, add
         };
       }
     }
+
+    const wantsCompareAll =
+      entities.compare_scope === 'all' || this.messageMatchesCompareMode(message, 'all');
+    if (wantsCompareAll && latestSet.items.length >= 2) {
+      return await this.runBikeComparisonMany(latestSet.items, language, node);
+    }
 ```
 
-- [ ] **Step 2: Test brand-vs-brand manually**
+- [ ] **Step 2: Test `brand_all` manually**
 
-Send `"compare yamaha vs honda"` in the chat (with no existing list shown). Expected: A comparison of the most popular Yamaha model vs the most popular Honda model from the DB.
+Send `"compare all yamaha"` in the chat. Expected: A comparison table of Yamaha models only.
+Send `"compare all"` in the chat. Expected: Full-list comparison (unchanged).
 
-Also test `"compare yamaha and honda"` — should produce the same result.
+- [ ] **Step 3: Test `brand_vs_brand` manually**
 
-- [ ] **Step 3: Commit**
+Send `"compare yamaha vs honda"` with no prior list shown. Expected: Top Yamaha vs top Honda from DB.
+Send `"compare yamaha and honda"`. Expected: Same result.
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/core/workflow-engine.js
-git commit -m "feat: handle compare_scope=brand_vs_brand in handleCompareBikes"
+git commit -m "feat: add brand_all and brand_vs_brand handlers before wantsCompareAll"
 ```
 
 ---
 
-## Task 4: Add DB fallback when `resolveRef()` misses both refs in current list
+## Task 3: Add DB fallback when `resolveRef()` misses both refs in current list
 
-This fixes "yamaha vs honda" when a product list IS shown but neither brand name appears as an item in the list.
+This fixes "yamaha vs honda" when a list IS shown but neither brand appears in it.
 
 **Files:**
 - Modify: `src/core/workflow-engine.js` (inside `handleCompareBikes()`, around line 646–660)
 
 - [ ] **Step 1: Add DB fallback between item resolution and not-found return**
 
-Find this code block (around line 646–660 in `handleCompareBikes()`):
+Find this block (the `item1`/`item2` section, around line 646–660):
 
 ```js
     const item1 = matches1[0] || null;
@@ -305,9 +370,9 @@ Replace it with:
 
 - [ ] **Step 2: Test cross-list brand comparison**
 
-With a product list already shown (e.g. from a previous search), send `"compare yamaha and modenas"` where neither brand appears in the shown list. Expected: Fetches one product per brand from DB and compares them.
+With a product list already shown (e.g. from a previous search for budget bikes), send `"compare yamaha and modenas"` where neither brand appears in the shown list. Expected: Fetches one product per brand from DB and compares them.
 
-Also confirm existing behaviour still works: `"compare 1 and 2"` → compares items 1 and 2 from the list (unchanged).
+Confirm existing behaviour is unchanged: `"compare 1 and 2"` → still compares list items 1 and 2.
 
 - [ ] **Step 3: Commit**
 
@@ -318,7 +383,7 @@ git commit -m "feat: add DB fallback when both compare refs miss the current lis
 
 ---
 
-## Task 5: Smoke-test all comparison scenarios end-to-end
+## Task 4: Smoke-test all comparison scenarios end-to-end
 
 **Files:** None changed — verification only.
 
@@ -328,24 +393,21 @@ git commit -m "feat: add DB fallback when both compare refs miss the current lis
 node src/index.js
 ```
 
-Or however you normally run the local server (check `package.json` scripts).
-
-- [ ] **Step 2: Run through each scenario**
-
-Use the test chat route or WhatsApp simulator. Test each message and confirm the expected output:
+- [ ] **Step 2: Run through each scenario and confirm expected output**
 
 | Message | Expected behaviour |
 |---|---|
 | `compare all` | Compares every item in the current shown list |
-| `compare all yamaha` | Compares all Yamaha models (from list if available, else DB) |
-| `compare yamaha vs honda` | Fetches top Yamaha and top Honda from DB and compares |
+| `compare all yamaha` | Compares Yamaha models only (from list if available, else DB) |
+| `compare all honda` | Compares Honda models only |
+| `compare yamaha vs honda` | Fetches top Yamaha and top Honda from DB, compares them |
 | `compare yamaha and honda` | Same as above |
-| `compare 1 and 2` | Compares items 1 and 2 from shown list (unchanged) |
-| `compare modenas and honda` | Works even when no list shown (resolveTwoProductsFromDb path) |
+| `compare 1 and 2` | Compares list items 1 and 2 (unchanged) |
+| `compare modenas and honda` | Works even with no list shown (DB lookup path) |
 | `which is better yamaha or honda` | compare_bikes intent, brand_vs_brand scope |
-| `bandingkan semua yamaha` | Malay: compare all yamaha (brand_all scope) |
+| `bandingkan semua yamaha` | Malay: brand_all scope, Yamaha only |
 
-- [ ] **Step 3: Final commit (no code changes expected — add only if minor fixes needed)**
+- [ ] **Step 3: Commit if any minor fixes were needed**
 
 ```bash
 git add -A
@@ -356,11 +418,11 @@ git commit -m "chore: verify smart comparison smoke tests pass"
 
 ## Verification Summary
 
-After all tasks complete, these are the key assertions:
+After all tasks complete:
 
-1. No brand names are hardcoded anywhere in JS files — all come from DB or user message
-2. `"compare all yamaha"` returns a Yamaha-only comparison table
-3. `"compare yamaha vs honda"` returns a cross-brand comparison even with no prior list
-4. `"compare 1 and 2"` still works as before
-5. `"compare all"` still works as before (full list)
-6. Invalid brands return a friendly not-found message (not a crash)
+1. `"compare all yamaha"` returns **Yamaha-only** comparison (the original bug is fixed)
+2. `"compare all"` (no brand) still returns full-list comparison
+3. `"compare yamaha vs honda"` fetches one representative per brand from DB
+4. `"compare 1 and 2"` still works unchanged
+5. No brand names are hardcoded in any JS file
+6. Invalid/unknown brands return a friendly not-found message
