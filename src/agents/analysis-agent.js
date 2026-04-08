@@ -236,7 +236,7 @@ class AnalysisAgent {
    * @param {object} context - { user_message, conversationHistory, lastIntent, entities, lastShownProducts, language, hasAskedBudget, hasAskedArea, hasAskedModel }
    * @returns {object|null} Plan with intent, entities, etc., or null to fall back to LLM.
    */
-  static async fastPath(context, config = {}) {
+  static fastPath(context, config = {}) {
     const message = (context.user_message || '').trim();
     const trimmed = message;
 
@@ -249,23 +249,6 @@ class AnalysisAgent {
       !trimmed.includes('?') &&
       !isNumericPick;
     const hasCompareKeyword = /compare|vs\.?|versus|bandingkan|比较/i.test(trimmed);
-
-    // Try AI-powered comparison detection FIRST - before regex rules
-    // This handles "compare all yamaha", "compare yamaha vs honda" etc. intelligently
-    if (hasCompareKeyword || context.conversationHistory?.length > 0 || hasLedger) {
-      const aiResult = await this.detectComparisonIntent(trimmed, context, config);
-      if (aiResult.isComparison && aiResult.confidence >= 0.7) {
-        if (DEBUG) console.log('[AnalysisAgent] fastPath AI comparison detected:', aiResult.comparisonType, aiResult.brandFilter);
-        return this._makeFastResult('compare_bikes', {
-          ...(context.entities || {}),
-          comparison_type: aiResult.comparisonType,
-          brand_filter: aiResult.brandFilter,
-          bikes_to_compare: aiResult.bikesToCompare,
-          attributes: aiResult.attributes,
-          ai_confidence: aiResult.confidence,
-        }, context, config);
-      }
-    }
 
     if (context.pendingCompare && hasCompareKeyword) {
       if (DEBUG) {
@@ -595,7 +578,7 @@ Conversation language: ${lang}. Last intent: ${context.lastIntent || 'none'}. Ex
     }
 
     // Fall back to rule-based fast path
-    const fast = await this.fastPath(context, config);
+    const fast = this.fastPath(context, config);
     if (fast) return fast;
 
     const systemPrompt = this.buildSystemPrompt(config, context);

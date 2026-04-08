@@ -425,65 +425,6 @@ class WorkflowEngine {
       }
     }
 
-    // Check for AI-resolved comparison context from analysis agent
-    const entities = context.entities || {};
-    const comparisonType = entities.comparison_type;
-    const brandFilter = entities.brand_filter;
-    const aiBikesToCompare = entities.bikes_to_compare;
-    const aiAttributes = entities.attributes;
-
-    if (comparisonType === 'single_brand' && brandFilter && !aiBikesToCompare?.length) {
-      // User said "compare all yamaha" - search by brand
-      if (DEBUG) console.log('[handleCompareBikes] AI single-brand comparison:', brandFilter);
-      const brandBikes = await SearchAgent.searchBikesByBrand(brandFilter, { limit: 10 });
-      if (brandBikes.length >= 2) {
-        const tempSession = { optionSets: Array.isArray(optionSets) ? [...optionSets] : [] };
-        appendOptionSet(tempSession, brandBikes, {
-          turnIndex: context.turnCount ?? 0,
-          context: 'ai-comparison',
-        });
-        optionSets = tempSession.optionSets;
-        latestSet = optionSets[optionSets.length - 1];
-        context.optionSets = optionSets;
-        if (context.metadata) context.metadata.optionSets = optionSets;
-        if (DEBUG) console.log('[handleCompareBikes] AI single-brand found', brandBikes.length, 'bikes');
-      }
-    }
-
-    if (comparisonType === 'multi_brand' && (aiBikesToCompare?.length || brandFilter)) {
-      // User said "compare yamaha vs honda"
-      if (DEBUG) console.log('[handleCompareBikes] AI multi-brand comparison:', aiBikesToCompare || brandFilter);
-      const brands = brandFilter?.split(' vs ').map(b => b.trim()) || aiBikesToCompare;
-      const groupedBikes = await SearchAgent.searchBikesByBrands(brands, { limit: 5 });
-
-      // Flatten for comparison - take top bike from each brand
-      const items = [];
-      let idx = 1;
-      Object.values(groupedBikes).forEach(bikes => {
-        if (bikes.length > 0) {
-          items.push({
-            displayIndex: idx++,
-            stableId: bikes[0].id,
-            title: bikes[0].name,
-            raw: bikes[0]
-          });
-        }
-      });
-
-      if (items.length >= 2) {
-        const tempSession = { optionSets: Array.isArray(optionSets) ? [...optionSets] : [] };
-        appendOptionSet(tempSession, items.map(it => it.raw), {
-          turnIndex: context.turnCount ?? 0,
-          context: 'ai-comparison',
-        });
-        optionSets = tempSession.optionSets;
-        latestSet = optionSets[optionSets.length - 1];
-        context.optionSets = optionSets;
-        if (context.metadata) context.metadata.optionSets = optionSets;
-        if (DEBUG) console.log('[handleCompareBikes] AI multi-brand found', items.length, 'brands');
-      }
-    }
-
     // No list in session: resolve two products by name/brand from DB (repeatable "compare X and Y")
     if (!latestSet || !Array.isArray(latestSet.items) || latestSet.items.length < 2) {
       const rawRefs = this.parseCompareRefs(message, latestSet);
