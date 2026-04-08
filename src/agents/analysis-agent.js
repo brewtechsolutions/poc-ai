@@ -480,6 +480,70 @@ class AnalysisAgent {
     return null;
   }
 
+  /**
+   * AI-powered comparison detection - understands any comparison type.
+   * Replaces regex-based comparative_follow_up_rules with AI interpretation.
+   */
+  static async detectComparisonIntent(userMessage, context = {}, config = {}) {
+    const { openai } = this;
+
+    // Build context for AI
+    const optionSets = context.optionSets || context.metadata?.optionSets;
+    const hasLedger = Array.isArray(optionSets) && optionSets.length > 0;
+    const lastShown = context.lastShownProducts || context.metadata?.lastShownProducts || [];
+    const lastComparedItems = context.lastComparedItems || context.entities?.lastComparedItems || [];
+
+    const systemPrompt = `You are a comparison analyzer for a motorcycle sales chatbot.
+
+Given the user's message and conversation context, determine:
+1. Is this a comparison request? (compare bikes, vs, which is better, etc.)
+2. What bikes/brands should be compared?
+3. What attributes matter (price, fuel, power, etc.)?
+
+Comparison types to recognize:
+- "compare all yamaha" → find all yamaha bikes, compare them
+- "compare yamaha vs honda" → compare yamaha vs honda bikes
+- "which is better for city riding" → compare based on city-riding attributes
+- "compare the sport bikes" → compare sport-type bikes
+- "which is more fuel efficient" → single attribute comparison
+
+User message: "${userMessage}"
+Language: ${context.language || 'english'}
+
+${hasLedger ? `Items in comparison ledger (these are bikes already shown to user): ${JSON.stringify(lastShown.map(p => ({name: p.name, brand: p.brand, price: p.price})))}` : 'No bikes shown yet.'}
+${lastComparedItems?.length >= 2 ? `Previously compared: ${JSON.stringify(lastComparedItems)}` : ''}
+
+Respond with JSON:
+{
+  "isComparison": true/false,
+  "comparisonType": "multi_brand" | "single_brand" | "attribute_focus" | "general",
+  "bikesToCompare": ["bike1", "bike2"],
+  "brandFilter": "yamaha",
+  "attributes": ["fuel", "price"],
+  "reasoning": "why this is/isn't a comparison",
+  "confidence": 0.0-1.0
+}`;
+
+    try {
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMessage }
+        ],
+        temperature: 0.3,
+        max_tokens: 300
+      });
+
+      const raw = completion.choices[0].message.content;
+      const cleaned = raw.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
+      return JSON.parse(cleaned);
+    } catch (err) {
+      console.warn('[AnalysisAgent] AI comparison detection failed:', err.message);
+      return { isComparison: false, confidence: 0 };
+    }
+  }
+
   static _makeFastResult(intent, entities, context, config = {}) {
     return {
       intent,
@@ -575,6 +639,25 @@ Conversation language: ${lang}. Last intent: ${context.lastIntent || 'none'}. Ex
         reasoning: aiFastPath.reasoning,
         tokensUsed: 0,
       };
+    }
+
+    // Try AI-powered comparison detection
+    const trimmed = (context.user_message || '').trim();
+    const optionSets = context.optionSets || context.metadata?.optionSets;
+    const hasLedger = Array.isArray(optionSets) && optionSets.length > 0;
+    if (context.conversationHistory?.length > 0 || hasLedger) {
+      const aiResult = await this.detectComparisonIntent(trimmed, context, config);
+      if (aiResult.isComparison && aiResult.confidence >= 0.7) {
+        if (DEBUG) console.log('[AnalysisAgent] AI comparison detected:', aiResult.comparisonType, aiResult.brandFilter);
+        return this._makeFastResult('compare_bikes', {
+          ...(context.entities || {}),
+          comparison_type: aiResult.comparisonType,
+          brand_filter: aiResult.brandFilter,
+          bikes_to_compare: aiResult.bikesToCompare,
+          attributes: aiResult.attributes,
+          ai_confidence: aiResult.confidence,
+        }, context, config);
+      }
     }
 
     // Fall back to rule-based fast path
